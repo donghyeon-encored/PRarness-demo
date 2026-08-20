@@ -1,0 +1,57 @@
+# Dependencies and package-manager state
+node_modules/
+.npm/
+.pnpm-store/
+.yarn/
+
+# Build, test, and runtime output
+coverage/
+.nyc_output/
+dist/
+build/
+out/
+.cache/
+.tmp/
+tmp/
+*.log
+*.tsbuildinfo
+.eslintcache
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Local agent and workflow artifacts
+.agent-runtime/
+artifacts/
+/worktree/
+/pr-head/
+/trusted/
+event.json
+state.json
+patch.diff
+
+# Local configuration and credentials
+.env
+.env.*
+*.local
+.npmrc
+.netrc
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+
+# Editors and operating systems
+.DS_Store
+._*
+Thumbs.db
+.idea/
+.vscode/
+/.codex/
+/.agents/
+/.claude/settings.local.json
+*.swp
+*~

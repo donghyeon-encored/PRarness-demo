@@ -1,0 +1,1634 @@
+name: Issue review agent pipeline
+
+on:
+  issues:
+    types: [opened, labeled]
+  pull_request:
+    types: [opened, synchronize, reopened]
+  pull_request_review:
+    types: [submitted]
+  pull_request_review_comment:
+    types: [created]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: Issue number to resume
+        required: false
+        type: number
+      pr_number:
+        description: Pull request number to review or resume
+        required: false
+        type: number
+      phase:
+        description: Phase to resume
+        required: false
+        default: auto
+        type: choice
+        options: [auto, triage, review]
+
+# Workflow-level expressions cannot safely parse a source Issue number out of
+# every review/comment payload before the gate job runs. The MVP therefore uses
+# a repository-wide lock: it is deliberately stricter than the per-Issue rule
+# and guarantees that two runs cannot mutate the same canonical Issue/PR state.
+concurrency:
+  group: issue-review-${{ github.repository_id }}
+  cancel-in-progress: false
+  queue: max
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  PIPELINE: .github/agent-pipeline/pipeline.mjs
+  TEAM: .github/agent-pipeline/team.yaml
+  NODE_VERSION: "22"
+  # Used only by the deterministic controller to authenticate canonical state
+  # comments. The App private key and write token are never exposed globally.
+  AGENT_APP_ID: ${{ vars.AGENT_APP_ID }}
+
+jobs:
+  gate:
+    name: Gate event and recover state
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+    outputs:
+      allowed: ${{ steps.gate.outputs.allowed }}
+      action: ${{ steps.gate.outputs.action }}
+      phase: ${{ steps.gate.outputs.phase }}
+      reason: ${{ steps.gate.outputs.reason }}
+      event_name: ${{ steps.gate.outputs.event_name }}
+      author_association: ${{ steps.gate.outputs.author_association }}
+      issue_number: ${{ steps.state.outputs.issue || steps.gate.outputs.issue_number }}
+      source_issue_number: ${{ steps.state.outputs.issue || steps.gate.outputs.source_issue_number }}
+      pr_number: ${{ steps.pr.outputs.pr_number || steps.state.outputs.pr || steps.gate.outputs.pr_number }}
+      checkout_ref: ${{ steps.pr.outputs.head_sha || steps.gate.outputs.head_sha || steps.state.outputs.current_sha || steps.trusted-base.outputs.sha }}
+      branch: ${{ steps.pr.outputs.branch || steps.state.outputs.branch || steps.gate.outputs.branch }}
+      iteration: ${{ steps.state.outputs.iteration || steps.gate.outputs.iteration }}
+      head_sha: ${{ steps.pr.outputs.head_sha || steps.gate.outputs.head_sha || steps.state.outputs.current_sha }}
+      base_sha: ${{ steps.pr.outputs.base_sha || steps.gate.outputs.base_sha || steps.trusted-base.outputs.sha }}
+      approval_required: ${{ steps.gate.outputs.approval_required }}
+      protected_approval_required: ${{ steps.protected-intake.outputs.requires_human }}
+    steps:
+      - name: Check out trusted default branch
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Pin the trusted default-branch snapshot
+        id: trusted-base
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: .github/agent-pipeline/package-lock.json
+
+      - name: Install orchestrator dependencies
+        run: npm ci --ignore-scripts --prefix .github/agent-pipeline
+
+      - name: Copy immutable event payload
+        env:
+          RUN_DIR: ${{ runner.temp }}/issue-review
+        run: |
+          mkdir -p "$RUN_DIR"
+          cp "$GITHUB_EVENT_PATH" "$RUN_DIR/event.json"
+
+      - name: Enforce trigger, actor, fork, branch, and iteration policy
+        id: gate
+        env:
+          RUN_DIR: ${{ runner.temp }}/issue-review
+          GH_TOKEN: ${{ github.token }}
+          DISPATCH_ISSUE: ${{ inputs.issue_number }}
+          DISPATCH_PR: ${{ inputs.pr_number }}
+          DISPATCH_PHASE: ${{ inputs.phase }}
+        run: |
+          node "$PIPELINE" gate-event \
+            --event "$RUN_DIR/event.json" \
+            --enriched-output "$RUN_DIR/event.json" \
+            --team "$TEAM" \
+            --dispatch-issue "$DISPATCH_ISSUE" \
+            --dispatch-pr "$DISPATCH_PR" \
+            --dispatch-phase "$DISPATCH_PHASE" \
+            --output "$RUN_DIR/gate.json"
+
+      - name: Recover the canonical state comment
+        id: state
+        if: steps.gate.outputs.allowed == 'true'
+        env:
+          RUN_DIR: ${{ runner.temp }}/issue-review
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ steps.gate.outputs.source_issue_number }}
+          PR_NUMBER: ${{ steps.gate.outputs.pr_number }}
+        run: |
+          node "$PIPELINE" load-state \
+            --event "$RUN_DIR/event.json" \
+            --issue "$ISSUE_NUMBER" \
+            --pr "$PR_NUMBER" \
+            --output "$RUN_DIR/state.json"
+
+      - name: Refresh PR refs recovered from an issue state
+        id: pr
+        if: >-
+          steps.gate.outputs.allowed == 'true' && steps.gate.outputs.head_sha == '' &&
+          steps.state.outputs.pr != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_DIR: ${{ runner.temp }}/issue-review
+          ISSUE_NUMBER: ${{ steps.state.outputs.issue || steps.gate.outputs.source_issue_number }}
+          PR_NUMBER: ${{ steps.state.outputs.pr }}
+        run: |
+          gh api "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" > "$RUN_DIR/refreshed-pr.json"
+          gh api "/repos/$GITHUB_REPOSITORY" > "$RUN_DIR/repository.json"
+          jq -n \
+            --slurpfile pr "$RUN_DIR/refreshed-pr.json" \
+            --slurpfile repository "$RUN_DIR/repository.json" \
+            '{action:"synchronize",pull_request:$pr[0],repository:$repository[0]}' \
+            > "$RUN_DIR/refreshed-pr-event.json"
+          env -u GITHUB_OUTPUT node "$PIPELINE" gate-event \
+            --event "$RUN_DIR/refreshed-pr-event.json" --event-name pull_request \
+            --team "$TEAM" --output "$RUN_DIR/refreshed-pr-gate.json"
+          jq -e --argjson issue "$ISSUE_NUMBER" \
+            '.allowed == true and .source_issue_number == $issue' \
+            "$RUN_DIR/refreshed-pr-gate.json" > /dev/null
+          echo "pr_number=$(jq -r .number "$RUN_DIR/refreshed-pr.json")" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$(jq -r .head.sha "$RUN_DIR/refreshed-pr.json")" >> "$GITHUB_OUTPUT"
+          echo "base_sha=$(jq -r .base.sha "$RUN_DIR/refreshed-pr.json")" >> "$GITHUB_OUTPUT"
+          echo "branch=$(jq -r .head.ref "$RUN_DIR/refreshed-pr.json")" >> "$GITHUB_OUTPUT"
+
+      - name: Capture fresh protected-authorization evidence
+        id: protected-evidence
+        continue-on-error: true
+        if: steps.gate.outputs.allowed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_DIR: ${{ runner.temp }}/issue-review
+          ISSUE_NUMBER: ${{ steps.state.outputs.issue || steps.gate.outputs.source_issue_number }}
+        run: |
+          printf '{}\n' > "$RUN_DIR/source-issue.json"
+          printf '[]\n' > "$RUN_DIR/source-issue-comments.json"
+          gh api "/repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER" > "$RUN_DIR/source-issue.tmp.json"
+          gh api --paginate --slurp "/repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER/comments?per_page=100" \
+            > "$RUN_DIR/source-issue-comments.tmp.json"
+          mv "$RUN_DIR/source-issue.tmp.json" "$RUN_DIR/source-issue.json"
+          mv "$RUN_DIR/source-issue-comments.tmp.json" "$RUN_DIR/source-issue-comments.json"
+
+      - name: Require deterministic protected scope approval before model work
+        id: protected-intake
+        if: steps.gate.outputs.allowed == 'true'
+        env:
+          RUN_DIR: ${{ runner.temp }}/issue-review
+          EVIDENCE_FRESH: ${{ steps.protected-evidence.outcome == 'success' }}
+        run: |
+          node "$PIPELINE" authorize-protected \
+            --team "$TEAM" --issue "$RUN_DIR/source-issue.json" \
+            --comments "$RUN_DIR/source-issue-comments.json" \
+            --state "$RUN_DIR/state.json" --evidence-fresh "$EVIDENCE_FRESH" \
+            --output "$RUN_DIR/protected-intake.json"
+          jq -n \
+            --slurpfile authorization "$RUN_DIR/protected-intake.json" \
+            --slurpfile state "$RUN_DIR/state.json" \
+            '{
+               issue:($authorization[0].issue // $state[0].issue),
+               state:($state[0] + {
+                 phase:"human_required",
+                 all_ok:false,
+                 protected_paths:$authorization[0]
+               }),
+               authorization:$authorization[0]
+             }' > "$RUN_DIR/protected-approval-input.json"
+
+      - name: Preserve gated context
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: gate-context-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/issue-review/
+          if-no-files-found: error
+          retention-days: 3
+
+  approval-required:
+    name: Ask a maintainer to approve external intake
+    needs: gate
+    if: needs.gate.outputs.approval_required == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.gate.outputs.base_sha || github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: .github/agent-pipeline/package-lock.json
+      - run: npm ci --ignore-scripts --prefix .github/agent-pipeline
+      - uses: actions/download-artifact@v8
+        with:
+          name: gate-context-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/issue-review
+
+      # No model runs for unapproved external content. The App token exists only
+      # in this deterministic publisher job.
+      - name: Create issue-only GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.AGENT_APP_ID }}
+          private-key: ${{ secrets.AGENT_APP_PRIVATE_KEY }}
+          permission-issues: write
+
+      - name: Label and publish approval instructions
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RUN_DIR: ${{ runner.temp }}/issue-review
+        run: node "$PIPELINE" publish --operation approval-required --input "$RUN_DIR/gate.json"
+
+  protected-approval-required:
+    name: Request exact protected-path authorization
+    needs: gate
+    if: needs.gate.outputs.protected_approval_required == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.gate.outputs.base_sha || github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: .github/agent-pipeline/package-lock.json
+      - run: npm ci --ignore-scripts --prefix .github/agent-pipeline
+      - uses: actions/download-artifact@v8
+        with:
+          name: gate-context-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/issue-review
+      - name: Create issue-only GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.AGENT_APP_ID }}
+          private-key: ${{ secrets.AGENT_APP_PRIVATE_KEY }}
+          permission-issues: write
+      - name: Publish protected-path approval instructions
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RUN_DIR: ${{ runner.temp }}/issue-review
+        run: >-
+          node "$PIPELINE" publish --operation protected-approval-required
+          --input "$RUN_DIR/protected-approval-input.json"
+
+  triage:
+    name: Triage and select one owner
+    needs: gate
+    if: >-
+      needs.gate.outputs.allowed == 'true' &&
+      needs.gate.outputs.protected_approval_required != 'true' &&
+      (needs.gate.outputs.phase == 'intake' || needs.gate.outputs.phase == 'triage' ||
+       ((needs.gate.outputs.phase == 'resume' || needs.gate.outputs.phase == 'dispatch') &&
+        needs.gate.outputs.pr_number == ''))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    outputs:
+      agent: ${{ steps.effective-route.outputs.agent }}
+      assignee: ${{ steps.owner.outputs.assignee }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.gate.outputs.base_sha || github.event.repository.default_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: .github/agent-pipeline/package-lock.json
+      - run: npm ci --ignore-scripts --prefix .github/agent-pipeline
+      - uses: actions/download-artifact@v8
+        with:
+          name: gate-context-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/issue-review
+
+      - name: Prepare read-only agent context
+        env:
+          RUN_DIR: ${{ runner.temp }}/issue-review
+        run: |
+          mkdir -p .agent-runtime
+          printf '\n/.agent-runtime/\n' >> .git/info/exclude
+          cp "$RUN_DIR/event.json" .agent-runtime/event.json
+          cp "$RUN_DIR/state.json" .agent-runtime/state.json
+
+      - name: Select bootstrap provider
+        id: bootstrap-route
+        env:
+          RUN_DIR: ${{ runner.temp }}/issue-review
+        run: node "$PIPELINE" route-agent --team "$TEAM" --output "$RUN_DIR/bootstrap-route.json"
+
+      - name: Compact Claude schema
+        id: triage-schema
+        run: |
+          schema=$(jq -c 'walk(if type == "object" then del(.description,.title,.["$id"],.["$schema"]) else . end)' \
+            .github/agent-pipeline/schemas/triage.schema.json)
+          echo "json=$schema" >> "$GITHUB_OUTPUT"
+
+      - name: Run Codex triage
+        id: codex-triage
+        if: steps.bootstrap-route.outputs.agent == 'codex'
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          permission-profile: ":read-only"
+          allow-bots: true
+          allow-bot-users: ${{ github.actor }}
+          output-schema-file: .github/agent-pipeline/schemas/triage.schema.json
+          output-file: .agent-runtime/triage.raw.json
+          prompt: |
+            Follow .github/agent-pipeline/prompts/triage.md exactly.
+            Read the approved event from .agent-runtime/event.json and recovered state from .agent-runtime/state.json.
+
+      - name: Run Claude triage
+        id: claude-triage
+        if: steps.bootstrap-route.outputs.agent == 'claude'
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          allowed_bots: ${{ github.actor }}
+          prompt: |
+            Follow .github/agent-pipeline/prompts/triage.md exactly.
+            Read the approved event from .agent-runtime/event.json and recovered state from .agent-runtime/state.json.
+          claude_args: >-
+            --json-schema '${{ steps.triage-schema.outputs.json }}'
+            --allowedTools Read,Glob,Grep
+            --disallowedTools WebFetch,WebSearch,Write,Edit,Bash
+
+      - name: Capture Claude structured output
+        if: steps.bootstrap-route.outputs.agent == 'claude'
+        env:
+          STRUCTURED_OUTPUT: ${{ steps.claude-triage.outputs.structured_output }}
+        run: printf '%s\n' "$STRUCTURED_OUTPUT" > .agent-runtime/triage.raw.json
+
+      - name: Normalize and deterministically select owner
+        id: owner
+        env:
+          RUN_DIR: ${{ runner.temp }}/issue-review
+          AGENT: ${{ steps.bootstrap-route.outputs.agent }}
+        run: |
+          node "$PIPELINE" normalize-agent-output \
+            --agent "$AGENT" --kind triage \
+            --input .agent-runtime/triage.raw.json \
+            --output "$RUN_DIR/triage.json"
+          node "$PIPELINE" select-owner \
+            --team "$TEAM" --event "$RUN_DIR/event.json" \
+            --triage "$RUN_DIR/triage.json" \
+            --output "$RUN_DIR/owner.json"
+
+      - name: Route subsequent work through the selected owner's main agent
+        id: effective-route
+        env:
+          RUN_DIR: ${{ runner.temp }}/issue-review
+          ASSIGNEE: ${{ steps.owner.outputs.assignee }}
+        run: node "$PIPELINE" route-agent --team "$TEAM" --assignee "$ASSIGNEE" --output "$RUN_DIR/route.json"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: triage-context-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/issue-review/
+          if-no-files-found: error
+          retention-days: 3
+
+  analyze:
+    name: Build CodeGraph, diagnose, and plan
+    needs: [gate, triage]
+    if: needs.triage.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    outputs:
+      agent: ${{ needs.triage.outputs.agent }}
+      assignee: ${{ needs.triage.outputs.assignee }}
+      human_required: ${{ steps.plan.outputs.human_required }}
+      units_json: ${{ steps.plan.outputs.units_json }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.gate.outputs.base_sha || github.event.repository.default_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: .github/agent-pipeline/package-lock.json
+      - run: npm ci --ignore-scripts --prefix .github/agent-pipeline
+      - uses: actions/download-artifact@v8
+        with:
+          name: triage-context-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/issue-review
+
+      - name: Build ephemeral file/dependency/ownership graph
+        env:
+          RUN_DIR: ${{ runner.temp }}/issue-review
+        run: |
+          node "$PIPELINE" build-codegraph \
+            --team "$TEAM" --repo . --event "$RUN_DIR/source-issue.json" \
+            --output "$RUN_DIR/codegraph.json"
+
+      - name: Prepare read-only planning context
+        env:
+          RUN_DIR: ${{ runner.temp }}/issue-review
+        run: |
+          mkdir -p .agent-runtime
+          printf '\n/.agent-runtime/\n' >> .git/info/exclude
+          cp "$RUN_DIR/event.json" .agent-runtime/event.json
+          cp "$RUN_DIR/state.json" .agent-runtime/state.json
+          cp "$RUN_DIR/triage.json" .agent-runtime/triage.json
+          cp "$RUN_DIR/codegraph.json" .agent-runtime/codegraph.json
+
+      - name: Compact Claude schema
+        id: plan-schema
+        run: |
+          schema=$(jq -c 'walk(if type == "object" then del(.description,.title,.["$id"],.["$schema"]) else . end)' \
+            .github/agent-pipeline/schemas/plan.schema.json)
+          echo "json=$schema" >> "$GITHUB_OUTPUT"
+
+      - name: Run Codex diagnosis and plan
+        id: codex-plan
+        if: needs.triage.outputs.agent == 'codex'
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          permission-profile: ":read-only"
+          allow-bots: true
+          allow-bot-users: ${{ github.actor }}
+          output-schema-file: .github/agent-pipeline/schemas/plan.schema.json
+          output-file: .agent-runtime/plan.raw.json
+          prompt: |
+            Follow .github/agent-pipeline/prompts/diagnose-plan.md exactly.
+            Runtime inputs are under .agent-runtime/. Diagnose and plan only; do not edit the checkout.
+
+      - name: Run Claude diagnosis and plan
+        id: claude-plan
+        if: needs.triage.outputs.agent == 'claude'
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          allowed_bots: ${{ github.actor }}
+          prompt: |
+            Follow .github/agent-pipeline/prompts/diagnose-plan.md exactly.
+            Runtime inputs are under .agent-runtime/. Diagnose and plan only; do not edit the checkout.
+          claude_args: >-
+            --json-schema '${{ steps.plan-schema.outputs.json }}'
+            --allowedTools Read,Glob,Grep
+            --disallowedTools WebFetch,WebSearch,Write,Edit,Bash
+
+      - name: Capture Claude structured output
+        if: needs.triage.outputs.agent == 'claude'
+        env:
+          STRUCTURED_OUTPUT: ${{ steps.claude-plan.outputs.structured_output }}
+        run: printf '%s\n' "$STRUCTURED_OUTPUT" > .agent-runtime/plan.raw.json
+
+      - name: Normalize and reconcile plan with trusted state and policy
+        id: plan
+        env:
+          RUN_DIR: ${{ runner.temp }}/issue-review
+          AGENT: ${{ needs.triage.outputs.agent }}
+        run: |
+          node "$PIPELINE" normalize-agent-output \
+            --agent "$AGENT" --kind plan \
+            --input .agent-runtime/plan.raw.json \
+            --output "$RUN_DIR/plan.normalized.json"
+          node "$PIPELINE" reconcile-plan \
+            --team "$TEAM" --state "$RUN_DIR/state.json" \
+            --plan "$RUN_DIR/plan.normalized.json" \
+            --output "$RUN_DIR/plan-reconciliation.json"
+          jq '.plan' "$RUN_DIR/plan-reconciliation.json" > "$RUN_DIR/plan.json"
+          jq -n \
+            --slurpfile plan "$RUN_DIR/plan.json" \
+            --slurpfile triage "$RUN_DIR/triage.json" \
+            --slurpfile issue "$RUN_DIR/source-issue.json" \
+            '{risk:$plan[0].risk,
+              changed_paths:$plan[0].changed_paths,
+              domains:($triage[0].domains // []),
+              risk_categories:($triage[0].risk_categories // []),
+              risk_assessment:($triage[0].risk_assessment // {}),
+              intake:($triage[0].intake // {}),
+              title:($issue[0].title // ""),
+              body:($issue[0].body // "")}' > "$RUN_DIR/risk-input.json"
+          node "$PIPELINE" evaluate-risk \
+            --team "$TEAM" --input "$RUN_DIR/risk-input.json" \
+            --output "$RUN_DIR/risk.json"
+          jq --slurpfile risk "$RUN_DIR/risk.json" --slurpfile triage "$RUN_DIR/triage.json" \
+            '.risk = $risk[0].risk |
+             .risk_context = {
+               domains:($triage[0].domains // []),
+               intake_security:($triage[0].intake.security_or_privacy // "unknown"),
+               categories:($risk[0].categories // $triage[0].risk_categories // []),
+               assessment:($risk[0].risk_assessment // $triage[0].risk_assessment // {}),
+               reasons:($risk[0].reasons // [])
+             }' \
+            "$RUN_DIR/plan.json" > "$RUN_DIR/plan.next.json"
+          mv "$RUN_DIR/plan.next.json" "$RUN_DIR/plan.json"
+          jq -n \
+            --slurpfile gate "$RUN_DIR/gate.json" \
+            --slurpfile state "$RUN_DIR/state.json" \
+            --slurpfile triage "$RUN_DIR/triage.json" \
+            --slurpfile owner "$RUN_DIR/owner.json" \
+            --slurpfile plan "$RUN_DIR/plan.json" \
+            --slurpfile reconciliation "$RUN_DIR/plan-reconciliation.json" \
+            --slurpfile risk "$RUN_DIR/risk.json" \
+            --slurpfile route "$RUN_DIR/route.json" \
+            '(($state[0] + {
+                phase:(if $reconciliation[0].human_required then "human_required" else "plan" end),
+                iteration:$plan[0].iteration,
+                assignee:$owner[0].assignee,
+                agent:$route[0].agent,
+                plan:$plan[0],
+                problems:$plan[0].problems,
+                validation:{passed:false,commands:($plan[0].validation_commands | map({command:.,passed:false,exit_code:null}))}
+              })) as $next |
+             {
+               issue:$next.issue,
+               state:$next,
+               assignee:$owner[0].assignee,
+               gate:$gate[0],
+               triage:$triage[0],
+               owner:$owner[0],
+               plan:$plan[0],
+               risk:$risk[0],
+               reconciliation:$reconciliation[0]
+             }' \
+            > "$RUN_DIR/analysis-input.json"
+          jq '.state' "$RUN_DIR/analysis-input.json" > "$RUN_DIR/state.next.json"
+          mv "$RUN_DIR/state.next.json" "$RUN_DIR/state.json"
+          # A valid multi-unit split fans the implement/verify/publish jobs out
+          # into one matrix instance per semantic unit, each with its own
+          # per-unit plan file. A non-split plan degenerates to one instance
+          # whose unit id is null, matching today's single-PR behavior exactly.
+          if jq -e '.split == true' "$RUN_DIR/plan-reconciliation.json" > /dev/null; then
+            jq -c '.units[]' "$RUN_DIR/plan-reconciliation.json" | while IFS= read -r unit; do
+              unit_id=$(printf '%s' "$unit" | jq -r '.id')
+              printf '%s\n' "$unit" > "$RUN_DIR/unit-${unit_id}-plan.json"
+            done
+            jq -c '[.units[] | {id, title, branch}]' "$RUN_DIR/plan-reconciliation.json" > "$RUN_DIR/units.json"
+          else
+            printf '[{"id":null,"title":null,"branch":null}]\n' > "$RUN_DIR/units.json"
+          fi
+          echo "units_json=$(cat "$RUN_DIR/units.json")" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: analysis-context-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/issue-review/
+          if-no-files-found: error
+          retention-days: 3
+
+  publish-analysis:
+    name: Assign owner and publish diagnosis/plan
+    needs: [gate, analyze]
+    if: needs.analyze.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.gate.outputs.base_sha || github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: .github/agent-pipeline/package-lock.json
+      - run: npm ci --ignore-scripts --prefix .github/agent-pipeline
+      - uses: actions/download-artifact@v8
+        with:
+          name: analysis-context-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/issue-review
+      - name: Create narrowly scoped GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.AGENT_APP_ID }}
+          private-key: ${{ secrets.AGENT_APP_PRIVATE_KEY }}
+          permission-issues: write
+      - name: Upsert canonical issue state and progress table
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RUN_DIR: ${{ runner.temp }}/issue-review
+        run: node "$PIPELINE" publish --operation analysis --input "$RUN_DIR/analysis-input.json"
+
+  verify-pr:
+    name: Verify current PR head without model secrets
+    needs: gate
+    if: >-
+      needs.gate.outputs.allowed == 'true' &&
+      ((needs.gate.outputs.event_name != 'pull_request_review' &&
+        needs.gate.outputs.event_name != 'pull_request_review_comment') ||
+       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), needs.gate.outputs.author_association)) &&
+      (needs.gate.outputs.phase == 'review' ||
+       ((needs.gate.outputs.phase == 'resume' || needs.gate.outputs.phase == 'dispatch') &&
+        needs.gate.outputs.pr_number != ''))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    outputs:
+      head_sha: ${{ steps.refs.outputs.head_sha }}
+      base_sha: ${{ steps.refs.outputs.base_sha }}
+      protected_ok: ${{ steps.protected.outcome == 'success' }}
+      validation_ok: ${{ steps.validate.outputs.passed }}
+    steps:
+      - name: Check out PR head
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.gate.outputs.checkout_ref }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: worktree
+      - name: Check out trusted policy from base
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.gate.outputs.base_sha || github.event.repository.default_branch }}
+          persist-credentials: false
+          path: trusted
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - run: npm ci --ignore-scripts --prefix trusted/.github/agent-pipeline
+      - uses: actions/download-artifact@v8
+        with:
+          name: gate-context-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/issue-review
+
+      - name: Capture exact base-to-head evidence
+        id: refs
+        working-directory: worktree
+        env:
+          RUN_DIR: ${{ runner.temp }}/issue-review
+          BASE_SHA: ${{ needs.gate.outputs.base_sha }}
+          PR_NUMBER: ${{ needs.gate.outputs.pr_number }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          head_sha=$(git rev-parse HEAD)
+          base_sha=$BASE_SHA
+          if [[ ! "$base_sha" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            base_sha=$(gh api "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq .base.sha)
+          fi
+          echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
+          echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
+          git diff --binary "$base_sha...$head_sha" > "$RUN_DIR/pr.diff"
+          git diff --name-only --no-renames -z "$base_sha...$head_sha" > "$RUN_DIR/changed-files.nul"
+          node "$GITHUB_WORKSPACE/trusted/.github/agent-pipeline/pipeline.mjs" paths-from-nul \
+            --input "$RUN_DIR/changed-files.nul" --output "$RUN_DIR/changed-files.json"
+          node "$GITHUB_WORKSPACE/trusted/.github/agent-pipeline/pipeline.mjs" evaluate-change-scope \
+            --team "$GITHUB_WORKSPACE/trusted/.github/agent-pipeline/team.yaml" \
+            --patch "$RUN_DIR/pr.diff" --output "$RUN_DIR/change-scope.json"
+
+      - name: Fetch fresh protected-authorization evidence
+        id: protected-evidence
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_DIR: ${{ runner.temp }}/issue-review
+          ISSUE_NUMBER: ${{ needs.gate.outputs.source_issue_number }}
+        run: |
+          printf '{}\n' > "$RUN_DIR/source-issue.live.json"
+          printf '[]\n' > "$RUN_DIR/source-issue-comments.live.json"
+          gh api "/repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER" > "$RUN_DIR/source-issue.live.tmp.json"
+          gh api --paginate --slurp "/repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER/comments?per_page=100" \
+            > "$RUN_DIR/source-issue-comments.live.tmp.json"
+          mv "$RUN_DIR/source-issue.live.tmp.json" "$RUN_DIR/source-issue.live.json"
+          mv "$RUN_DIR/source-issue-comments.live.tmp.json" "$RUN_DIR/source-issue-comments.live.json"
+
+      - name: Check protected paths with fresh human authorization
+        id: protected
+        continue-on-error: true
+        env:
+          RUN_DIR: ${{ runner.temp }}/issue-review
+          EVIDENCE_FRESH: ${{ steps.protected-evidence.outcome == 'success' }}
+        run: |
+          node trusted/.github/agent-pipeline/pipeline.mjs authorize-protected \
+            --team trusted/.github/agent-pipeline/team.yaml \
+            --issue "$RUN_DIR/source-issue.live.json" \
+            --comments "$RUN_DIR/source-issue-comments.live.json" \
+            --paths "$RUN_DIR/changed-files.json" --state "$RUN_DIR/state.json" \
+            --evidence-fresh "$EVIDENCE_FRESH" --output "$RUN_DIR/protected.json"
+          jq -e '.passed == true' "$RUN_DIR/protected.json" > /dev/null
+
+      - name: Recompute PR risk from the verified base-to-head paths
+        env:
+          RUN_DIR: ${{ runner.temp }}/issue-review
+        run: |
+          jq -n \
+            --slurpfile state "$RUN_DIR/state.json" \
+            --slurpfile issue "$RUN_DIR/source-issue.json" \
+            '{risk:($state[0].plan.risk // "high"),
+              domains:($state[0].plan.risk_context.domains // []),
+              risk_categories:($state[0].plan.risk_context.categories // []),
+              risk_assessment:($state[0].plan.risk_context.assessment // {}),
+              intake:{security_or_privacy:($state[0].plan.risk_context.intake_security // "unknown")},
+              title:($issue[0].title // ""),
+              body:($issue[0].body // "")}' > "$RUN_DIR/actual-risk-input.json"
+          node trusted/.github/agent-pipeline/pipeline.mjs evaluate-risk \
+            --team trusted/.github/agent-pipeline/team.yaml \
+            --input "$RUN_DIR/actual-risk-input.json" \
+            --paths "$RUN_DIR/changed-files.json" \
+            --output "$RUN_DIR/risk.json"
+
+      - name: Install project dependencies before validation
+        working-directory: worktree
+        run: |
+          if [[ -f package-lock.json ]]; then
+            npm ci --ignore-scripts
+          fi
+
+      - name: Run trusted validation commands
+        id: validate
+        working-directory: worktree
+        env:
+          RUN_DIR: ${{ runner.temp }}/issue-review
+          TRUSTED_PIPELINE: ${{ github.workspace }}/trusted/.github/agent-pipeline/pipeline.mjs
+          TRUSTED_TEAM: ${{ github.workspace }}/trusted/.github/agent-pipeline/team.yaml
+        run: |
+          node "$TRUSTED_PIPELINE" validation-commands --team "$TRUSTED_TEAM" --output "$RUN_DIR/validation-commands.json"
+          passed=true
+          : > "$RUN_DIR/validation.jsonl"
+          while IFS= read -r encoded; do
+            command=$(printf '%s' "$encoded" | base64 --decode)
+            set +e
+            bash -lc "$command"
+            exit_code=$?
+            set -e
+            if [[ $exit_code -ne 0 ]]; then passed=false; fi
+            jq -cn --arg command "$command" --argjson exit_code "$exit_code" \
+              '{command:$command,passed:($exit_code==0),exit_code:$exit_code}' >> "$RUN_DIR/validation.jsonl"
+          done < <(jq -r '.[] | @base64' "$RUN_DIR/validation-commands.json")
+          jq -s --argjson passed "$passed" '{passed:$passed,commands:.}' \
+            "$RUN_DIR/validation.jsonl" > "$RUN_DIR/validation.json"
+          echo "passed=$passed" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: pr-verification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/issue-review/
+          if-no-files-found: error
+          retention-days: 3
+
+  review:
+    name: Structured risk review
+    needs: [gate, verify-pr]
+    if: needs.verify-pr.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    outputs:
+      agent: ${{ steps.route.outputs.agent }}
+      all_ok: ${{ steps.decision.outputs.all_ok }}
+      auto_fix: ${{ steps.decision.outputs.auto_fix }}
+      human_required: ${{ steps.decision.outputs.human_required }}
+    steps:
+      # All executable policy, prompts, and schemas stay on the trusted base.
+      # The PR head is nested data and is never used to install the orchestrator.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.verify-pr.outputs.base_sha || github.event.repository.default_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check out PR head as review data
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.gate.outputs.checkout_ref }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: pr-head
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: .github/agent-pipeline/package-lock.json
+      - run: npm ci --ignore-scripts --prefix .github/agent-pipeline
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: "{gate-context,pr-verification}-${{ github.run_id }}-${{ github.run_attempt }}"
+          merge-multiple: true
+          path: ${{ runner.temp }}/issue-review
+
+      - name: Recover effective provider from canonical owner
+        id: route
+        env:
+          RUN_DIR: ${{ runner.temp }}/issue-review
+        run: node "$PIPELINE" route-agent --team "$TEAM" --state "$RUN_DIR/state.json" --output "$RUN_DIR/route.json"
+
+      - name: Build fresh ephemeral CodeGraph and review context
+        env:
+          RUN_DIR: ${{ runner.temp }}/issue-review
+        run: |
+          node "$PIPELINE" build-codegraph \
+            --team "$TEAM" --repo pr-head --event "$RUN_DIR/source-issue.json" \
+            --blame-files "$RUN_DIR/changed-files.json" \
+            --output "$RUN_DIR/codegraph.json"
+          jq -n \
+            --slurpfile state "$RUN_DIR/state.json" \
+            --slurpfile graph "$RUN_DIR/codegraph.json" \
+            --slurpfile risk "$RUN_DIR/risk.json" \
+            --slurpfile event "$RUN_DIR/event.json" \
+            '{issue_assignee:$state[0].assignee,
+              implementer:$state[0].assignee,
+              author:($event[0].pull_request.user.login // ""),
+              risk:$risk[0].risk,
+              domains:($state[0].plan.risk_context.domains // []),
+              codegraph:$graph[0]}' > "$RUN_DIR/review-team-input.json"
+          node "$PIPELINE" select-pr-team \
+            --team "$TEAM" --input "$RUN_DIR/review-team-input.json" \
+            --changed-files "$RUN_DIR/changed-files.json" \
+            --output "$RUN_DIR/pr-team.json"
+          mkdir -p .agent-runtime
+          printf '\n/.agent-runtime/\n' >> .git/info/exclude
+          cp "$RUN_DIR/event.json" .agent-runtime/event.json
+          cp "$RUN_DIR/state.json" .agent-runtime/state.json
+          jq --slurpfile risk "$RUN_DIR/risk.json" '(if .plan != null then .plan else {
+                issue:.issue,
+                iteration:.iteration,
+                phase:"plan",
+                risk:"high",
+                problems:.problems,
+                steps:["Review the canonical unresolved problems"],
+                validation_commands:(.validation.commands | map(.command)),
+                changed_paths:[]
+              } end) | .risk = $risk[0].risk' "$RUN_DIR/state.json" > .agent-runtime/plan.json
+          cp "$RUN_DIR/codegraph.json" .agent-runtime/codegraph.json
+          cp "$RUN_DIR/pr.diff" .agent-runtime/pr.diff
+          cp "$RUN_DIR/validation.json" .agent-runtime/validation.json
+          cp "$RUN_DIR/protected.json" .agent-runtime/protected.json
+          cp "$RUN_DIR/risk.json" .agent-runtime/risk.json
+          cp "$RUN_DIR/pr-team.json" .agent-runtime/pr-team.json
+          printf '%s\n' '${{ needs.verify-pr.outputs.head_sha }}' > .agent-runtime/head-sha.txt
+
+      - name: Compact Claude schema
+        id: review-schema
+        run: |
+          schema=$(jq -c 'walk(if type == "object" then del(.description,.title,.["$id"],.["$schema"]) else . end)' \
+            .github/agent-pipeline/schemas/review.schema.json)
+          echo "json=$schema" >> "$GITHUB_OUTPUT"
+
+      - name: Run Codex review
+        id: codex-review
+        if: steps.route.outputs.agent == 'codex'
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          permission-profile: ":read-only"
+          allow-bots: true
+          allow-bot-users: ${{ github.actor }}
+          output-schema-file: .github/agent-pipeline/schemas/review.schema.json
+          output-file: .agent-runtime/review.raw.json
+          prompt: |
+            Follow .github/agent-pipeline/prompts/review.md exactly.
+            The untrusted PR head is under pr-head/ and immutable evidence is under .agent-runtime/.
+            Review only that PR head and exact SHA. Do not edit or publish.
+
+      - name: Run Claude review
+        id: claude-review
+        if: steps.route.outputs.agent == 'claude'
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          allowed_bots: ${{ github.actor }}
+          prompt: |
+            Follow .github/agent-pipeline/prompts/review.md exactly.
+            The untrusted PR head is under pr-head/ and immutable evidence is under .agent-runtime/.
+            Review only that PR head and exact SHA. Do not edit or publish.
+          claude_args: >-
+            --json-schema '${{ steps.review-schema.outputs.json }}'
+            --allowedTools Read,Glob,Grep
+            --disallowedTools WebFetch,WebSearch,Write,Edit,Bash
+
+      - name: Capture Claude structured output
+        if: steps.route.outputs.agent == 'claude'
+        env:
+          STRUCTURED_OUTPUT: ${{ steps.claude-review.outputs.structured_output }}
+        run: printf '%s\n' "$STRUCTURED_OUTPUT" > .agent-runtime/review.raw.json
+
+      - name: Normalize and evaluate exact All OK conditions
+        id: decision
+        env:
+          RUN_DIR: ${{ runner.temp }}/issue-review
+          AGENT: ${{ steps.route.outputs.agent }}
+          HEAD_SHA: ${{ needs.verify-pr.outputs.head_sha }}
+        run: |
+          node "$PIPELINE" normalize-agent-output \
+            --agent "$AGENT" --kind review \
+            --input .agent-runtime/review.raw.json \
+            --output "$RUN_DIR/review.json"
+          GITHUB_OUTPUT= node "$PIPELINE" evaluate-review \
+            --team "$TEAM" --review "$RUN_DIR/review.json" \
+            --state "$RUN_DIR/state.json" --current-sha "$HEAD_SHA" \
+            --validation "$RUN_DIR/validation.json" \
+            --protected "$RUN_DIR/protected.json" \
+            --change-scope "$RUN_DIR/change-scope.json" \
+            --output "$RUN_DIR/decision.json"
+          jq --slurpfile team "$RUN_DIR/pr-team.json" \
+            'if $team[0].human_required then
+               . + {
+                 all_ok:false,
+                 auto_fix:false,
+                 human_required:true,
+                 next_phase:"human_required",
+                 failures:((.failures + ["reviewer_unavailable"]) | unique)
+               }
+             else . end' "$RUN_DIR/decision.json" > "$RUN_DIR/decision.next.json"
+          mv "$RUN_DIR/decision.next.json" "$RUN_DIR/decision.json"
+          for key in all_ok auto_fix human_required; do
+            echo "$key=$(jq -r --arg key "$key" '.[$key]' "$RUN_DIR/decision.json")" >> "$GITHUB_OUTPUT"
+          done
+          jq -n \
+            --arg head "$HEAD_SHA" \
+            --slurpfile gate "$RUN_DIR/gate.json" \
+            --slurpfile state "$RUN_DIR/state.json" \
+            --slurpfile review "$RUN_DIR/review.json" \
+            --slurpfile decision "$RUN_DIR/decision.json" \
+            --slurpfile validation "$RUN_DIR/validation.json" \
+            --slurpfile protected "$RUN_DIR/protected.json" \
+            --slurpfile scope "$RUN_DIR/change-scope.json" \
+            --slurpfile risk "$RUN_DIR/risk.json" \
+            --slurpfile team "$RUN_DIR/pr-team.json" \
+            '(($state[0] + {
+                phase:(if $decision[0].human_required then "human_required" elif $decision[0].split_required then "split_required" else "review" end),
+                current_sha:$head,
+                reviewer:$team[0].reviewer,
+                plan:(if $state[0].plan == null then null else ($state[0].plan + {risk:$risk[0].risk}) end),
+                validation:$validation[0],
+                change_scope:$scope[0],
+                protected_paths:($state[0].protected_paths + {
+                  passed:$protected[0].passed,
+                  matched:$protected[0].matched,
+                  scope_approved_by:($protected[0].approved_by // null),
+                  scope_approval_comment_id:($protected[0].approval_comment_id // null)
+                })
+              })) as $next |
+             {
+               issue:$next.issue,
+               pr:$next.pr,
+               state:$next,
+               review:$review[0],
+               evaluation:$decision[0],
+               current_sha:$head,
+               reviewer:$team[0].reviewer,
+               team:$team[0],
+               risk:$risk[0],
+               decision:$decision[0],
+               gate:$gate[0]
+            }' \
+            > "$RUN_DIR/review-input.json"
+          jq '.state' "$RUN_DIR/review-input.json" > "$RUN_DIR/state.next.json"
+          mv "$RUN_DIR/state.next.json" "$RUN_DIR/state.json"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: review-context-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/issue-review/
+          if-no-files-found: error
+          retention-days: 3
+
+  publish-review:
+    name: Publish inline findings and summary
+    needs: [gate, review]
+    if: needs.review.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.gate.outputs.base_sha || github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: .github/agent-pipeline/package-lock.json
+      - run: npm ci --ignore-scripts --prefix .github/agent-pipeline
+      - uses: actions/download-artifact@v8
+        with:
+          name: review-context-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/issue-review
+      - name: Create review-only GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.AGENT_APP_ID }}
+          private-key: ${{ secrets.AGENT_APP_PRIVATE_KEY }}
+          permission-issues: write
+          permission-pull-requests: write
+      - name: Publish review and update canonical state
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RUN_DIR: ${{ runner.temp }}/issue-review
+        run: node "$PIPELINE" publish --operation review --input "$RUN_DIR/review-input.json"
+      - name: Mark non-draft ready for human review after exact All OK
+        if: needs.review.outputs.all_ok == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RUN_DIR: ${{ runner.temp }}/issue-review
+        run: node "$PIPELINE" publish --operation ready --input "$RUN_DIR/review-input.json"
+
+  implement:
+    name: Produce one local patch cycle
+    needs: [gate, analyze, publish-analysis, review, publish-review]
+    if: >-
+      always() && needs.gate.outputs.allowed == 'true' &&
+      ((needs.analyze.result == 'success' && needs.publish-analysis.result == 'success' &&
+        needs.analyze.outputs.human_required != 'true') ||
+       (needs.review.result == 'success' && needs.publish-review.result == 'success' &&
+        needs.review.outputs.auto_fix == 'true'))
+    # A valid multi-unit split (see the `analyze` job) runs this job once per
+    # semantic unit in parallel, each producing its own independent patch/
+    # branch/PR. A non-split plan, and every later per-PR fix cycle, always
+    # degenerates to the single `{id:null}` instance below and behaves exactly
+    # as a single-PR run always has. `needs.implement.outputs.*` is not safe
+    # to read from a matrix job, so downstream jobs (verify-change,
+    # publish-change) never do; every value a later job needs crosses the
+    # matrix boundary through this job's own per-unit uploaded artifact
+    # instead.
+    strategy:
+      matrix:
+        unit: ${{ fromJson(needs.analyze.outputs.units_json || '[{"id":null,"title":null,"branch":null}]') }}
+      fail-fast: false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    steps:
+      # As in review, policy remains on the trusted default branch. The model
+      # may edit only the nested target checkout, and no script from that tree
+      # is executed after provider credentials are introduced.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.gate.outputs.base_sha || github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Check out implementation target as data
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.gate.outputs.checkout_ref }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: worktree
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Install dependencies before exposing provider credentials
+        run: |
+          npm ci --ignore-scripts --prefix .github/agent-pipeline
+          if [[ -f worktree/package-lock.json ]]; then
+            npm ci --ignore-scripts --prefix worktree
+          fi
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: "{analysis-context,review-context}-${{ github.run_id }}-${{ github.run_attempt }}"
+          merge-multiple: true
+          path: ${{ runner.temp }}/issue-review
+
+      - name: Select immutable implementation context
+        id: context
+        env:
+          RUN_DIR: ${{ runner.temp }}/issue-review
+          ANALYZE_AGENT: ${{ needs.analyze.outputs.agent }}
+          REVIEW_AGENT: ${{ needs.review.outputs.agent }}
+          UNIT_ID: ${{ matrix.unit.id }}
+          UNIT_BRANCH: ${{ matrix.unit.branch }}
+        run: |
+          mkdir -p .agent-runtime
+          printf '\n/.agent-runtime/\n' >> .git/info/exclude
+          cp "$RUN_DIR/event.json" .agent-runtime/event.json
+          if [[ -f "$RUN_DIR/review.json" ]]; then
+            mode=fix
+            agent=$REVIEW_AGENT
+            cp "$RUN_DIR/review.json" .agent-runtime/review.json
+            node "$PIPELINE" plan-from-review \
+              --team "$TEAM" --state "$RUN_DIR/state.json" \
+              --review "$RUN_DIR/review.json" \
+              --validation "$RUN_DIR/validation.json" \
+              --output "$RUN_DIR/plan.json"
+            cp "$RUN_DIR/state.json" .agent-runtime/state.json
+          elif [[ -n "$UNIT_ID" && "$UNIT_ID" != "null" ]]; then
+            # One matrix instance of a valid split: this unit's own plan and a
+            # unit-scoped view of state (branch/unit/problems), never another
+            # unit's paths. Written back into $RUN_DIR/state.json too, since
+            # that whole directory becomes this instance's uploaded artifact.
+            mode=initial
+            agent=$ANALYZE_AGENT
+            cp "$RUN_DIR/unit-${UNIT_ID}-plan.json" "$RUN_DIR/plan.json"
+            jq -n --slurpfile state "$RUN_DIR/state.json" --slurpfile plan "$RUN_DIR/plan.json" \
+              --arg unit "$UNIT_ID" --arg branch "$UNIT_BRANCH" \
+              '$state[0] + {unit:$unit, branch:$branch, plan:$plan[0], problems:$plan[0].problems}' \
+              > "$RUN_DIR/state.next.json"
+            mv "$RUN_DIR/state.next.json" "$RUN_DIR/state.json"
+            cp "$RUN_DIR/state.json" .agent-runtime/state.json
+          else
+            mode=initial
+            agent=$ANALYZE_AGENT
+            cp "$RUN_DIR/state.json" .agent-runtime/state.json
+          fi
+          cp "$RUN_DIR/plan.json" .agent-runtime/plan.json
+          [[ -f "$RUN_DIR/validation.json" ]] && cp "$RUN_DIR/validation.json" .agent-runtime/validation.json
+          [[ -f "$RUN_DIR/codegraph.json" ]] && cp "$RUN_DIR/codegraph.json" .agent-runtime/codegraph.json
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "agent=$agent" >> "$GITHUB_OUTPUT"
+
+      - name: Run Codex implementation
+        id: codex-implement
+        if: steps.context.outputs.agent == 'codex'
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          permission-profile: ":workspace"
+          allow-bots: true
+          allow-bot-users: ${{ github.actor }}
+          output-file: .agent-runtime/implementation-summary.txt
+          prompt: |
+            Follow .github/agent-pipeline/prompts/implement.md exactly.
+            The approved event, state, plan, and optional review are under .agent-runtime/.
+            The implementation target is the nested worktree/ directory.
+            Edit only worktree/. Do not commit, push, call GitHub, or modify .agent-runtime.
+
+      - name: Run Claude implementation
+        id: claude-implement
+        if: steps.context.outputs.agent == 'claude'
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          allowed_bots: ${{ github.actor }}
+          prompt: |
+            Follow .github/agent-pipeline/prompts/implement.md exactly.
+            The approved event, state, plan, and optional review are under .agent-runtime/.
+            The implementation target is the nested worktree/ directory.
+            Edit only worktree/. Do not commit, push, call GitHub, or modify .agent-runtime.
+          claude_args: >-
+            --allowedTools Read,Glob,Grep,Edit,Write
+            --disallowedTools WebFetch,WebSearch,Bash
+
+      - name: Capture tracked and untracked changes as a patch
+        id: patch
+        working-directory: worktree
+        env:
+          RUN_DIR: ${{ runner.temp }}/issue-review
+          TRUSTED_PIPELINE: ${{ github.workspace }}/.github/agent-pipeline/pipeline.mjs
+        run: |
+          # Intent-to-add makes new files visible to git diff without staging or
+          # committing model output. Runtime context is outside this checkout.
+          git add -N --all
+          # Diff against HEAD so a model-staged edit cannot disappear from the
+          # deterministic patch artifact.
+          git diff HEAD --binary > "$RUN_DIR/patch.diff"
+          git diff HEAD --name-only --no-renames -z > "$RUN_DIR/changed-files.nul"
+          node "$TRUSTED_PIPELINE" paths-from-nul \
+            --input "$RUN_DIR/changed-files.nul" --output "$RUN_DIR/changed-files.json"
+          if [[ -s "$RUN_DIR/patch.diff" ]]; then has_changes=true; else has_changes=false; fi
+          echo "has_changes=$has_changes" >> "$GITHUB_OUTPUT"
+          # Read directly from this instance's own artifact downstream instead
+          # of needs.implement.outputs.has_changes, which is not reliable once
+          # this job is a matrix (a later job only ever sees the last matrix
+          # instance's job-level output, never the one matching its own unit).
+          printf '%s\n' "$has_changes" > "$RUN_DIR/has-changes.txt"
+          if [[ -f ../.agent-runtime/implementation-summary.txt ]]; then
+            cp ../.agent-runtime/implementation-summary.txt "$RUN_DIR/implementation-summary.txt"
+          else
+            printf 'Claude implementation completed; deterministic verification follows.\n' \
+              > "$RUN_DIR/implementation-summary.txt"
+          fi
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: implementation-patch-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.unit.id || 'main' }}
+          path: ${{ runner.temp }}/issue-review/
+          if-no-files-found: error
+          retention-days: 3
+
+  verify-change:
+    name: Reapply and verify patch on a fresh runner
+    needs: [gate, analyze, implement]
+    if: needs.implement.result == 'success'
+    # Mirrors the implement job's matrix exactly (same units_json, same
+    # null-id fallback) so each unit's own artifact is verified independently.
+    strategy:
+      matrix:
+        unit: ${{ fromJson(needs.analyze.outputs.units_json || '[{"id":null,"title":null,"branch":null}]') }}
+      fail-fast: false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+    steps:
+      - name: Check out unchanged implementation base
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.gate.outputs.checkout_ref }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: worktree
+      - name: Check out trusted policy from default branch
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.gate.outputs.base_sha || github.event.repository.default_branch }}
+          persist-credentials: false
+          path: trusted
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - run: npm ci --ignore-scripts --prefix trusted/.github/agent-pipeline
+      - uses: actions/download-artifact@v8
+        with:
+          name: implementation-patch-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.unit.id || 'main' }}
+          path: ${{ runner.temp }}/issue-review
+
+      - name: Load this unit's implementation result
+        id: implemented
+        env:
+          RUN_DIR: ${{ runner.temp }}/issue-review
+        run: |
+          has_changes=$(cat "$RUN_DIR/has-changes.txt")
+          mode=initial
+          [[ -f "$RUN_DIR/review.json" ]] && mode=fix
+          echo "has_changes=$has_changes" >> "$GITHUB_OUTPUT"
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+
+      - name: Validate and apply patch without executing it
+        if: steps.implemented.outputs.has_changes == 'true'
+        working-directory: worktree
+        env:
+          RUN_DIR: ${{ runner.temp }}/issue-review
+          TRUSTED_PIPELINE: ${{ github.workspace }}/trusted/.github/agent-pipeline/pipeline.mjs
+        run: |
+          git apply --check "$RUN_DIR/patch.diff"
+          git apply --index "$RUN_DIR/patch.diff"
+          git diff --cached --name-only --no-renames -z > "$RUN_DIR/changed-files.nul"
+          node "$TRUSTED_PIPELINE" paths-from-nul \
+            --input "$RUN_DIR/changed-files.nul" --output "$RUN_DIR/changed-files.json"
+
+      - name: Enforce cumulative one-unit PR line budget
+        working-directory: worktree
+        env:
+          RUN_DIR: ${{ runner.temp }}/issue-review
+          BASE_SHA: ${{ needs.gate.outputs.base_sha }}
+          TRUSTED_PIPELINE: ${{ github.workspace }}/trusted/.github/agent-pipeline/pipeline.mjs
+          TRUSTED_TEAM: ${{ github.workspace }}/trusted/.github/agent-pipeline/team.yaml
+        run: |
+          git diff --cached --binary "$BASE_SHA" -- > "$RUN_DIR/pr-cumulative.diff"
+          node "$TRUSTED_PIPELINE" evaluate-change-scope \
+            --team "$TRUSTED_TEAM" --patch "$RUN_DIR/pr-cumulative.diff" \
+            --output "$RUN_DIR/change-scope.json"
+
+      - name: Recompute final risk from the actual changed files
+        env:
+          RUN_DIR: ${{ runner.temp }}/issue-review
+        run: |
+          jq -n \
+            --slurpfile plan "$RUN_DIR/plan.json" \
+            --slurpfile state "$RUN_DIR/state.json" \
+            --slurpfile issue "$RUN_DIR/source-issue.json" \
+            '{risk:(if $plan[0].risk == "high" or $state[0].plan.risk == "high" then "high" else "low" end),
+              domains:($plan[0].risk_context.domains // $state[0].plan.risk_context.domains // []),
+              risk_categories:($plan[0].risk_context.categories // $state[0].plan.risk_context.categories // []),
+              risk_assessment:($plan[0].risk_context.assessment // $state[0].plan.risk_context.assessment // {}),
+              intake:{security_or_privacy:($plan[0].risk_context.intake_security // $state[0].plan.risk_context.intake_security // "unknown")},
+              title:($issue[0].title // ""),
+              body:($issue[0].body // "")}' > "$RUN_DIR/actual-risk-input.json"
+          node trusted/.github/agent-pipeline/pipeline.mjs evaluate-risk \
+            --team trusted/.github/agent-pipeline/team.yaml \
+            --input "$RUN_DIR/actual-risk-input.json" \
+            --paths "$RUN_DIR/changed-files.json" \
+            --output "$RUN_DIR/risk.json"
+          jq --slurpfile risk "$RUN_DIR/risk.json" '.risk = $risk[0].risk' \
+            "$RUN_DIR/plan.json" > "$RUN_DIR/plan.next.json"
+          mv "$RUN_DIR/plan.next.json" "$RUN_DIR/plan.json"
+
+      - name: Fetch fresh protected-authorization evidence
+        id: protected-evidence
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_DIR: ${{ runner.temp }}/issue-review
+          ISSUE_NUMBER: ${{ needs.gate.outputs.source_issue_number }}
+        run: |
+          printf '{}\n' > "$RUN_DIR/source-issue.live.json"
+          printf '[]\n' > "$RUN_DIR/source-issue-comments.live.json"
+          gh api "/repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER" > "$RUN_DIR/source-issue.live.tmp.json"
+          gh api --paginate --slurp "/repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER/comments?per_page=100" \
+            > "$RUN_DIR/source-issue-comments.live.tmp.json"
+          mv "$RUN_DIR/source-issue.live.tmp.json" "$RUN_DIR/source-issue.live.json"
+          mv "$RUN_DIR/source-issue-comments.live.tmp.json" "$RUN_DIR/source-issue-comments.live.json"
+
+      - name: Check protected paths using fresh human authorization
+        id: protected
+        continue-on-error: true
+        env:
+          RUN_DIR: ${{ runner.temp }}/issue-review
+          EVIDENCE_FRESH: ${{ steps.protected-evidence.outcome == 'success' }}
+        run: |
+          node trusted/.github/agent-pipeline/pipeline.mjs authorize-protected \
+            --team trusted/.github/agent-pipeline/team.yaml \
+            --issue "$RUN_DIR/source-issue.live.json" \
+            --comments "$RUN_DIR/source-issue-comments.live.json" \
+            --paths "$RUN_DIR/changed-files.json" --state "$RUN_DIR/state.json" \
+            --evidence-fresh "$EVIDENCE_FRESH" --output "$RUN_DIR/protected.json"
+          jq -e '.passed == true' "$RUN_DIR/protected.json" > /dev/null
+
+      - name: Refresh CodeGraph with changed-file blame and recent history
+        env:
+          RUN_DIR: ${{ runner.temp }}/issue-review
+        run: |
+          node trusted/.github/agent-pipeline/pipeline.mjs build-codegraph \
+            --team trusted/.github/agent-pipeline/team.yaml \
+            --repo worktree --event "$RUN_DIR/source-issue.json" \
+            --blame-files "$RUN_DIR/changed-files.json" \
+            --output "$RUN_DIR/codegraph.json"
+
+      - name: Install project dependencies without lifecycle scripts
+        working-directory: worktree
+        run: |
+          if [[ -f package-lock.json ]]; then
+            npm ci --ignore-scripts
+          fi
+
+      - name: Run trusted validation commands
+        id: validate
+        working-directory: worktree
+        env:
+          RUN_DIR: ${{ runner.temp }}/issue-review
+          TRUSTED_PIPELINE: ${{ github.workspace }}/trusted/.github/agent-pipeline/pipeline.mjs
+          TRUSTED_TEAM: ${{ github.workspace }}/trusted/.github/agent-pipeline/team.yaml
+        run: |
+          node "$TRUSTED_PIPELINE" validation-commands --team "$TRUSTED_TEAM" --output "$RUN_DIR/validation-commands.json"
+          passed=true
+          : > "$RUN_DIR/validation.jsonl"
+          while IFS= read -r encoded; do
+            command=$(printf '%s' "$encoded" | base64 --decode)
+            set +e
+            bash -lc "$command"
+            exit_code=$?
+            set -e
+            if [[ $exit_code -ne 0 ]]; then passed=false; fi
+            jq -cn --arg command "$command" --argjson exit_code "$exit_code" \
+              '{command:$command,passed:($exit_code==0),exit_code:$exit_code}' >> "$RUN_DIR/validation.jsonl"
+          done < <(jq -r '.[] | @base64' "$RUN_DIR/validation-commands.json")
+          jq -s --argjson passed "$passed" '{passed:$passed,commands:.}' \
+            "$RUN_DIR/validation.jsonl" > "$RUN_DIR/validation.json"
+          echo "passed=$passed" >> "$GITHUB_OUTPUT"
+
+      - name: Select PR assignees/reviewer and decide publication
+        id: result
+        env:
+          RUN_DIR: ${{ runner.temp }}/issue-review
+          PROTECTED_OK: ${{ steps.protected.outcome == 'success' }}
+          VALIDATION_OK: ${{ steps.validate.outputs.passed }}
+          HAS_CHANGES: ${{ steps.implemented.outputs.has_changes }}
+        run: |
+          for file in owner route codegraph risk triage; do
+            [[ -f "$RUN_DIR/$file.json" ]] || printf '{}\n' > "$RUN_DIR/$file.json"
+          done
+          jq -n \
+            --slurpfile state "$RUN_DIR/state.json" \
+            --slurpfile owner "$RUN_DIR/owner.json" \
+            --slurpfile route "$RUN_DIR/route.json" \
+            --slurpfile graph "$RUN_DIR/codegraph.json" \
+            --slurpfile risk "$RUN_DIR/risk.json" \
+            --slurpfile triage "$RUN_DIR/triage.json" \
+            --slurpfile plan "$RUN_DIR/plan.json" \
+            '{
+               issue_assignee:($state[0].assignee // $owner[0].assignee),
+               implementer:($state[0].assignee // $route[0].assignee // $owner[0].assignee),
+               risk:($risk[0].risk // $plan[0].risk // "high"),
+               domains:($triage[0].domains // []),
+               codegraph:$graph[0]
+             }' > "$RUN_DIR/pr-team-input.json"
+          node trusted/.github/agent-pipeline/pipeline.mjs select-pr-team \
+            --team trusted/.github/agent-pipeline/team.yaml \
+            --input "$RUN_DIR/pr-team-input.json" \
+            --changed-files "$RUN_DIR/changed-files.json" \
+            --output "$RUN_DIR/pr-team.json"
+          scope_ok=$(jq -r '.passed' "$RUN_DIR/change-scope.json")
+          publishable=false
+          if [[ "$HAS_CHANGES" == true && "$PROTECTED_OK" == true && "$VALIDATION_OK" == true && "$scope_ok" == true ]]; then publishable=true; fi
+          echo "publishable=$publishable" >> "$GITHUB_OUTPUT"
+          jq -n \
+            --slurpfile gate "$RUN_DIR/gate.json" \
+            --slurpfile state "$RUN_DIR/state.json" \
+            --slurpfile team "$RUN_DIR/pr-team.json" \
+            --slurpfile validation "$RUN_DIR/validation.json" \
+            --slurpfile protected "$RUN_DIR/protected.json" \
+            --slurpfile scope "$RUN_DIR/change-scope.json" \
+            --slurpfile plan "$RUN_DIR/plan.json" \
+            --slurpfile changed "$RUN_DIR/changed-files.json" \
+            --rawfile implementation_summary "$RUN_DIR/implementation-summary.txt" \
+            --arg patch "$RUN_DIR/patch.diff" \
+            --arg mode "${{ steps.implemented.outputs.mode }}" \
+            --argjson has_changes "$HAS_CHANGES" \
+            --argjson publishable "$publishable" \
+             '(if ($has_changes | not) then
+                 "구현 agent가 게시 가능한 변경을 만들지 않았습니다. " + ($implementation_summary | gsub("[\\r\\n]+$"; ""))
+               elif ($protected[0].passed != true) then
+                 "Protected path authorization failed: " + ($protected[0].reason // "authorization_required")
+               elif ($validation[0].passed != true) then
+                 "검증 명령 실패: " + (($validation[0].commands // [] | map(select(.passed != true) | .command)) | join(", "))
+               elif ($scope[0].passed != true) then
+                 (if $scope[0].split_required then
+                    "이 unit 자체 diff가 예상보다 커졌습니다 (" + (($scope[0].changed_lines | tostring) + " lines, 최대 " +
+                      ($scope[0].maximum | tostring) + " lines). 같은 Issue 안에서 semantic-unit PR을 다시 나눠 계획해야 합니다.")
+                  else
+                    "PR 변경 범위 정책 실패: " + (($scope[0].changed_lines | tostring) + " lines (" + $scope[0].reason + ")")
+                  end)
+               else "결정론적 게시 조건을 충족하지 못했습니다."
+               end) as $blocker |
+              (($plan[0].problems // []) | map(
+                if $publishable or .status == "DONE" or .status == "FIXED" then .
+                elif $scope[0].split_required then
+                  . + {status:"PLANNED",evidence:$blocker,next_step:"Re-plan this unit into smaller semantic-unit PRs on the same Issue"}
+                else
+                  . + {status:"HUMAN_REQUIRED",evidence:$blocker,next_step:"Maintainer decision"}
+                end)) as $updated_problems |
+              (if $publishable then $updated_problems
+               elif ($updated_problems | length) > 0 then $updated_problems
+               else [{id:"P-700000001",problem:(if $scope[0].split_required then "PR 의미 단위 재분할 필요" else "자동 구현이 게시 가능한 결과를 만들지 못함" end),
+                      risk:($plan[0].risk // "high"),status:(if $scope[0].split_required then "PLANNED" else "HUMAN_REQUIRED" end),evidence:$blocker,
+                      owner:($state[0].assignee // null),next_step:(if $scope[0].split_required then "Re-plan this unit into smaller semantic-unit PRs on the same Issue" else "Maintainer decision" end)}]
+               end) as $problems |
+              (($state[0] + {
+                phase:(if $publishable and ($team[0].human_required | not) then "implement" elif $scope[0].split_required then "split_required" else "human_required" end),
+                iteration:$plan[0].iteration,
+                plan:$plan[0],
+                problems:$problems,
+                reviewer:$team[0].reviewer,
+                validation:$validation[0],
+                change_scope:$scope[0],
+                protected_paths:{
+                  passed:$protected[0].passed,
+                  matched:$protected[0].matched,
+                  scope_approved_by:($protected[0].approved_by // null),
+                  scope_approval_comment_id:($protected[0].approval_comment_id // null),
+                  content_approved_by:null,
+                  content_approved_sha:null
+                }
+              })) as $next |
+             {
+               issue:$next.issue,
+               state:$next,
+               # A split unit already carries its own precomputed branch in
+               # state (written by the implement job); only the ordinary
+               # single-PR Issue falls back to the gate-derived branch name.
+               branch:($next.branch // $gate[0].branch),
+               assignees:$team[0].assignees,
+               reviewer:$team[0].reviewer,
+               changed_paths:$changed[0],
+               repo:"worktree",
+               gate:$gate[0],
+               team:$team[0],
+               validation:$validation[0],
+               protected:$protected[0],
+               change_scope:$scope[0],
+               split_required:$scope[0].split_required,
+               patch:$patch,
+               mode:$mode,
+               has_changes:$has_changes,
+               body:(if ($has_changes | not) or ($scope[0].passed != true) or ($protected[0].passed == true and $validation[0].passed != true)
+                     then $blocker else null end),
+               publishable:$publishable
+             }' \
+            > "$RUN_DIR/pr-input.json"
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: verified-change-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.unit.id || 'main' }}
+          path: ${{ runner.temp }}/issue-review/
+          if-no-files-found: error
+          retention-days: 3
+
+  publish-change:
+    name: Publish verified branch/PR or a human-required state
+    needs: [gate, analyze, implement, verify-change]
+    if: always() && needs.verify-change.result == 'success'
+    # Same matrix as implement/verify-change. needs.verify-change.outputs.* is
+    # not safe to read here (matrix job outputs only reflect one arbitrary
+    # instance), so this job's own steps re-derive publishable/has_changes
+    # from this unit's own downloaded verified-change artifact instead.
+    strategy:
+      matrix:
+        unit: ${{ fromJson(needs.analyze.outputs.units_json || '[{"id":null,"title":null,"branch":null}]') }}
+      fail-fast: false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.gate.outputs.base_sha || github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Check out publication target as data
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.gate.outputs.checkout_ref }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: worktree
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: .github/agent-pipeline/package-lock.json
+      - run: npm ci --ignore-scripts --prefix .github/agent-pipeline
+      - uses: actions/download-artifact@v8
+        with:
+          name: verified-change-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.unit.id || 'main' }}
+          path: ${{ runner.temp }}/issue-review
+
+      - name: Load this unit's verification result
+        id: verified
+        env:
+          RUN_DIR: ${{ runner.temp }}/issue-review
+        run: |
+          echo "publishable=$(jq -r '.publishable' "$RUN_DIR/pr-input.json")" >> "$GITHUB_OUTPUT"
+          echo "has_changes=$(jq -r '.has_changes' "$RUN_DIR/pr-input.json")" >> "$GITHUB_OUTPUT"
+
+      - name: Reapply the already verified patch to the publication worktree
+        if: steps.verified.outputs.has_changes == 'true'
+        working-directory: worktree
+        env:
+          RUN_DIR: ${{ runner.temp }}/issue-review
+        run: |
+          git apply --check "$RUN_DIR/patch.diff"
+          git apply "$RUN_DIR/patch.diff"
+
+      - name: Revalidate live default branch and PR lifecycle before minting a write token
+        if: steps.verified.outputs.publishable == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_DIR: ${{ runner.temp }}/issue-review
+        run: node "$PIPELINE" check-live-publication --input "$RUN_DIR/pr-input.json"
+
+      # This is intentionally after independent patch application, protected
+      # path checks, and validation in verify-change.
+      - name: Create GitHub App branch/PR token
+        id: app-write-token
+        if: steps.verified.outputs.publishable == 'true'
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.AGENT_APP_ID }}
+          private-key: ${{ secrets.AGENT_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-issues: write
+          permission-pull-requests: write
+
+      - name: Create comment-only blocker token
+        id: app-comment-token
+        if: steps.verified.outputs.publishable != 'true'
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.AGENT_APP_ID }}
+          private-key: ${{ secrets.AGENT_APP_PRIVATE_KEY }}
+          permission-issues: write
+
+      - name: Commit, push, and create/update one draft PR
+        if: steps.verified.outputs.publishable == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-write-token.outputs.token }}
+          RUN_DIR: ${{ runner.temp }}/issue-review
+        run: node "$PIPELINE" publish --operation pr --input "$RUN_DIR/pr-input.json" --repo worktree
+
+      - name: Record validation/protected-path blocker without pushing
+        if: steps.verified.outputs.publishable != 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-comment-token.outputs.token }}
+          RUN_DIR: ${{ runner.temp }}/issue-review
+        run: |
+          operation=state
+          if jq -e '.protected.passed == false' "$RUN_DIR/pr-input.json" > /dev/null; then
+            operation=protected-approval-required
+          fi
+          node "$PIPELINE" publish --operation "$operation" --input "$RUN_DIR/pr-input.json"

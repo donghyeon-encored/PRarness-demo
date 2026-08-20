@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/agent-pipeline/review.schema.json",
+  "title": "Pull request review output",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "reviewed_sha", "findings"],
+  "properties": {
+    "verdict": {
+      "type": "string",
+      "enum": ["pass", "fix_required"]
+    },
+    "reviewed_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{40}$"
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "path",
+          "line",
+          "problem",
+          "risk",
+          "must_fix",
+          "suggested_fix",
+          "human_owner"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^P-[0-9]{3,}$"
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "line": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "problem": {
+            "type": "string",
+            "minLength": 1
+          },
+          "risk": {
+            "type": "string",
+            "enum": ["low", "high", "unknown"]
+          },
+          "must_fix": {
+            "type": "boolean"
+          },
+          "suggested_fix": {
+            "type": "string",
+            "minLength": 1
+          },
+          "human_owner": {
+            "type": ["string", "null"]
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "risk": { "enum": ["high", "unknown"] }
+              },
+              "required": ["risk"]
+            },
+            "then": {
+              "properties": {
+                "must_fix": { "const": true }
+              }
+            }
+          }
+        ]
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "verdict": { "const": "fix_required" } },
+        "required": ["verdict"]
+      },
+      "then": {
+        "properties": {
+          "findings": {
+            "minItems": 1,
+            "contains": {
+              "type": "object",
+              "properties": { "must_fix": { "const": true } },
+              "required": ["must_fix"]
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "verdict": { "const": "pass" } },
+        "required": ["verdict"]
+      },
+      "then": {
+        "properties": {
+          "findings": {
+            "not": {
+              "contains": {
+                "type": "object",
+                "properties": { "must_fix": { "const": true } },
+                "required": ["must_fix"]
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="A small recipe scaling demo for PRarness.">
+    <title>PRarness Recipe Scaler</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <section class="intro" aria-labelledby="page-title">
+        <p class="eyebrow">PRarness demo</p>
+        <h1 id="page-title">Scale a recipe without the mental math.</h1>
+        <p>
+          This deliberately small product gives an issue-review agent a real,
+          testable code path to improve.
+        </p>
+      </section>
+
+      <section class="card" aria-labelledby="recipe-title">
+        <div class="card-heading">
+          <div>
+            <p class="eyebrow">Weekend pancakes</p>
+            <h2 id="recipe-title">Ingredients</h2>
+          </div>
+          <div class="servings">
+            <label for="target-servings">Target servings</label>
+            <select id="target-servings">
+              <option value="2">2</option>
+              <option value="4" selected>4</option>
+              <option value="8">8</option>
+            </select>
+          </div>
+        </div>
+
+        <ul id="ingredients" class="ingredients" aria-live="polite"></ul>
+        <button id="scale-button" type="button">Scale recipe</button>
+        <p id="status" class="status" role="status"></p>
+      </section>
+    </main>
+
+    <script type="module" src="/app.mjs"></script>
+  </body>
+</html>

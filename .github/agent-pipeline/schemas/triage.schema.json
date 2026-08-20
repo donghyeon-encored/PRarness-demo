@@ -1,0 +1,145 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/agent-pipeline/triage.schema.json",
+  "title": "Issue triage output",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "intake",
+    "assignee",
+    "agent",
+    "risk",
+    "risk_categories",
+    "risk_assessment",
+    "domains",
+    "changed_paths",
+    "rationale"
+  ],
+  "properties": {
+    "intake": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "problem",
+        "reproduction_steps",
+        "expected_result",
+        "actual_result",
+        "impact",
+        "relevant_logs",
+        "security_or_privacy"
+      ],
+      "properties": {
+        "problem": {
+          "type": ["string", "null"],
+          "description": "The reported problem, or null when the issue does not state one."
+        },
+        "reproduction_steps": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Ordered reproduction steps stated by the reporter; empty when absent."
+        },
+        "expected_result": {
+          "type": ["string", "null"]
+        },
+        "actual_result": {
+          "type": ["string", "null"]
+        },
+        "impact": {
+          "type": ["string", "null"]
+        },
+        "relevant_logs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Only short, relevant log excerpts supplied in the issue; redact any apparent secret."
+        },
+        "security_or_privacy": {
+          "type": "string",
+          "enum": ["none", "present", "unknown"],
+          "description": "Whether the report involves security or personal data. Unknown must result in high risk."
+        }
+      }
+    },
+    "assignee": {
+      "type": "string",
+      "minLength": 1,
+      "description": "One recommended active GitHub login. The deterministic selector recomputes and may override it."
+    },
+    "agent": {
+      "type": "string",
+      "enum": ["codex", "claude"],
+      "description": "The selected assignee's main agent, falling back to the bootstrap agent."
+    },
+    "risk": {
+      "type": "string",
+      "enum": ["low", "high"],
+      "description": "Agent risk classification. Uncertainty must be represented as high."
+    },
+    "risk_categories": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "access_control",
+          "sensitive_information_exposure",
+          "application_security",
+          "security_configuration",
+          "data_integrity",
+          "data_loss",
+          "data_compatibility",
+          "data_governance",
+          "service_availability",
+          "performance_capacity",
+          "dependency_resilience",
+          "deployment_recovery",
+          "operational_visibility",
+          "equivalent_severity"
+        ]
+      },
+      "uniqueItems": true,
+      "description": "Relevant risk domains, including low-materiality candidates. Use equivalent_severity only for analogous high impact not captured by a named category."
+    },
+    "risk_assessment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["impact", "likelihood", "blast_radius", "reversibility", "detectability", "evidence"],
+      "properties": {
+        "impact": { "type": "string", "enum": ["negligible", "limited", "material", "severe", "unknown"] },
+        "likelihood": { "type": "string", "enum": ["unlikely", "possible", "likely", "unknown"] },
+        "blast_radius": { "type": "string", "enum": ["local", "contained", "broad", "unknown"] },
+        "reversibility": { "type": "string", "enum": ["easy", "managed", "difficult", "irreversible", "unknown"] },
+        "detectability": { "type": "string", "enum": ["strong", "adequate", "weak", "unknown"] },
+        "evidence": { "type": "string", "minLength": 1 }
+      },
+      "description": "Contextual materiality assessment. Category presence alone does not imply high risk."
+    },
+    "domains": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true,
+      "description": "Repository or business domains supported by issue evidence."
+    },
+    "changed_paths": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true,
+      "description": "Likely repository-relative paths; empty when they cannot be inferred before CodeGraph."
+    },
+    "rationale": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Concise evidence for ownership and risk recommendations."
+    }
+  }
+}

@@ -1,0 +1,253 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/agent-pipeline/state.schema.json",
+  "title": "Canonical issue-review state",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "issue",
+    "unit",
+    "units_index",
+    "phase",
+    "iteration",
+    "branch",
+    "pr",
+    "assignee",
+    "reviewer",
+    "agent",
+    "plan",
+    "reviewed_sha",
+    "current_sha",
+    "all_ok",
+    "problems",
+    "validation",
+    "protected_paths",
+    "change_scope"
+  ],
+  "properties": {
+    "version": {
+      "type": "integer",
+      "const": 1
+    },
+    "issue": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "unit": {
+      "type": ["string", "null"],
+      "description": "null identifies the single pre-split/overview thread. A non-null value marks one independently reviewable semantic-unit PR spawned from this Issue; each unit carries its own canonical state comment and lifecycle."
+    },
+    "units_index": {
+      "type": "array",
+      "description": "Populated only on the unit:null overview thread once the Issue has been split: a summary pointer to every spawned unit's branch/PR.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "title", "branch", "pr"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "title": { "type": "string", "minLength": 1 },
+          "branch": { "type": ["string", "null"] },
+          "pr": { "type": ["integer", "null"], "minimum": 1 }
+        }
+      }
+    },
+    "phase": {
+      "type": "string",
+      "enum": [
+        "intake",
+        "human_approval",
+        "triage",
+        "codegraph",
+        "diagnose",
+        "plan",
+        "implement",
+        "review",
+        "split_required",
+        "ready_for_human",
+        "human_required",
+        "done"
+      ]
+    },
+    "iteration": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "branch": {
+      "type": ["string", "null"]
+    },
+    "pr": {
+      "type": ["integer", "null"],
+      "minimum": 1
+    },
+    "assignee": {
+      "type": ["string", "null"],
+      "description": "The single deterministic Issue assignee used for cross-run provider routing."
+    },
+    "reviewer": {
+      "type": ["string", "null"],
+      "description": "The deterministic human reviewer whose exact-SHA approval may resolve HUMAN_REQUIRED findings."
+    },
+    "agent": {
+      "type": ["string", "null"],
+      "enum": ["codex", "claude", null]
+    },
+    "plan": {
+      "type": ["object", "null"],
+      "description": "The normalized approved plan retained as evidence for later review runs."
+    },
+    "reviewed_sha": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-fA-F]{40}$"
+    },
+    "current_sha": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-fA-F]{40}$"
+    },
+    "all_ok": {
+      "type": "boolean"
+    },
+    "problems": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "problem",
+          "risk",
+          "status",
+          "evidence",
+          "owner",
+          "next_step"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^P-[0-9]{3,}$"
+          },
+          "problem": {
+            "type": "string",
+            "minLength": 1
+          },
+          "risk": {
+            "type": "string",
+            "enum": ["low", "high"]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "OPEN",
+              "PLANNED",
+              "IN_PROGRESS",
+              "FIXED",
+              "REVIEW_PENDING",
+              "HUMAN_REQUIRED",
+              "DONE"
+            ]
+          },
+          "evidence": {
+            "type": "string",
+            "minLength": 1
+          },
+          "owner": {
+            "type": ["string", "null"]
+          },
+          "next_step": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "validation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["passed", "commands"],
+      "properties": {
+        "passed": {
+          "type": "boolean"
+        },
+        "commands": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["command", "passed", "exit_code"],
+            "properties": {
+              "command": {
+                "type": "string",
+                "minLength": 1
+              },
+              "passed": {
+                "type": "boolean"
+              },
+              "exit_code": {
+                "type": ["integer", "null"]
+              }
+            }
+          }
+        }
+      }
+    },
+    "protected_paths": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "passed",
+        "matched",
+        "scope_approved_by",
+        "scope_approval_comment_id",
+        "content_approved_by",
+        "content_approved_sha"
+      ],
+      "properties": {
+        "passed": {
+          "type": "boolean"
+        },
+        "matched": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "scope_approved_by": {
+          "type": ["string", "null"]
+        },
+        "scope_approval_comment_id": {
+          "type": ["integer", "null"],
+          "minimum": 1
+        },
+        "content_approved_by": {
+          "type": ["string", "null"]
+        },
+        "content_approved_sha": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-fA-F]{40}$"
+        }
+      }
+    },
+    "change_scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["passed", "commit_unit", "pr_unit", "additions", "deletions", "changed_lines", "target", "maximum", "binary", "split_required", "recommended_pr_count", "reason"],
+      "properties": {
+        "passed": { "type": "boolean" },
+        "commit_unit": { "type": "string", "const": "single_crud_bundle" },
+        "pr_unit": { "type": "string", "const": "single_semantic_unit" },
+        "additions": { "type": "integer", "minimum": 0 },
+        "deletions": { "type": "integer", "minimum": 0 },
+        "changed_lines": { "type": "integer", "minimum": 0 },
+        "target": { "type": "integer", "minimum": 0 },
+        "maximum": { "type": "integer", "minimum": 0 },
+        "binary": { "type": "boolean" },
+        "split_required": { "type": "boolean" },
+        "recommended_pr_count": { "type": "integer", "minimum": 0 },
+        "reason": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

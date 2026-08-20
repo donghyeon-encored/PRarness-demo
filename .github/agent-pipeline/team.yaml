@@ -1,0 +1,147 @@
+version: 1
+
+pipeline:
+  bootstrap_agent: codex
+  fallback_assignee: platform-maintainer
+
+  max_issue_assignees: 1
+  max_pr_assignees: 3
+  max_auto_iterations: 5
+
+  change_scope:
+    commit_unit: single_crud_bundle
+    pr_unit: single_semantic_unit
+    target_pr_changed_lines: 200
+    max_pr_changed_lines: 400
+
+  branch_prefix: agent/issue-
+  unknown_risk_is_high: true
+
+  risk_policy:
+    equivalent_severity_is_high: true
+    categories:
+      - id: access_control
+        title: Access Control Risk
+        signals: ["access control", "authentication", "authorization", "privilege", "permission", "role", "session", "oauth"]
+        high_impact_signals: ["authentication bypass", "authorization bypass", "unauthorized access", "privilege escalation", "cross-tenant access", "weakens authorization"]
+      - id: sensitive_information_exposure
+        title: Sensitive Information Exposure Risk
+        signals: ["credential", "secret", "token", "personal information", "personal data", "pii", "confidential", "internal system detail"]
+        high_impact_signals: ["credential exposure", "secret exposure", "data leak", "pii exposure", "secret in logs", "confidential data exposure"]
+      - id: application_security
+        title: Application Security Risk
+        signals: ["injection", "input validation", "unsafe execution", "command execution", "deserialization", "xss", "csrf", "ssrf", "vulnerability"]
+        high_impact_signals: ["remote code execution", "arbitrary code execution", "sql injection", "exploitable vulnerability", "dependency vulnerability", "unsafe deserialization"]
+      - id: security_configuration
+        title: Security Configuration Risk
+        signals: ["security configuration", "encryption", "tls", "cors", "csp", "trust boundary", "certificate", "security policy", "workflow", "github permission"]
+        high_impact_signals: ["disables encryption", "certificate validation disabled", "public access enabled", "trust boundary removed", "weakens security policy", "write permission exposed"]
+      - id: data_integrity
+        title: Data Integrity Risk
+        signals: ["data integrity", "corruption", "duplicate", "inconsistent data", "incorrect data", "partial write", "idempotency", "concurrency", "consistency"]
+        high_impact_signals: ["data corruption", "duplicate writes", "lost update", "inconsistent state", "non-atomic write", "partial commit"]
+      - id: data_loss
+        title: Data Loss Risk
+        signals: ["data loss", "delete", "deletion", "irreversible", "overwrite", "truncate", "drop table"]
+        high_impact_signals: ["irreversible deletion", "unintended deletion", "data loss", "overwrite without backup", "truncate table", "drop table"]
+      - id: data_compatibility
+        title: Data Compatibility Risk
+        signals: ["data compatibility", "schema", "format", "api contract", "compatibility", "serialization", "migration"]
+        high_impact_signals: ["breaking schema", "incompatible format", "breaking api", "unreadable stored data", "backward incompatible", "migration rollback impossible"]
+      - id: data_governance
+        title: Data Governance Risk
+        signals: ["data governance", "privacy", "retention", "auditability", "data lifecycle", "compliance", "data access", "payment", "billing"]
+        high_impact_signals: ["privacy violation", "retention violation", "compliance breach", "unaudited access", "audit trail removed", "payment data exposure", "payment", "billing"]
+      - id: service_availability
+        title: Service Availability Risk
+        signals: ["service availability", "outage", "downtime", "startup failure", "request failure", "crash"]
+        high_impact_signals: ["service outage", "downtime", "startup failure", "widespread request failure", "crash loop", "production unavailable"]
+      - id: performance_capacity
+        title: Performance and Capacity Risk
+        signals: ["performance", "capacity", "latency", "memory", "cpu", "resource consumption", "system load", "leak"]
+        high_impact_signals: ["capacity exhaustion", "resource saturation", "out of memory", "oom", "slo violation", "unbounded growth", "material cost increase", "fleet-wide increase"]
+      - id: dependency_resilience
+        title: Dependency and Resilience Risk
+        signals: ["dependency", "resilience", "timeout", "retry", "circuit breaker", "fallback", "dependency failure"]
+        high_impact_signals: ["dependency outage", "retry storm", "no timeout", "removes fallback", "single point of failure", "circuit breaker disabled"]
+      - id: deployment_recovery
+        title: Deployment and Recovery Risk
+        signals: ["deployment", "rollback", "recovery", "release failure", "infrastructure", "disaster recovery"]
+        high_impact_signals: ["deployment failure", "rollback impossible", "recovery failure", "unrecoverable", "production rollback", "disaster recovery disabled"]
+      - id: operational_visibility
+        title: Operational Visibility Risk
+        signals: ["operational visibility", "logging", "metrics", "tracing", "alerting", "observability", "monitoring", "diagnosis"]
+        high_impact_signals: ["logging disabled", "alert removed", "monitoring disabled", "observability blind spot", "undetectable failure", "audit log removed"]
+
+  protected_paths:
+    - ".github/workflows/**"
+    - ".github/agent-pipeline/**"
+    - "CODEOWNERS"
+    - "docs/git-ground-rules.md"
+    - "AGENTS.md"
+    - "CLAUDE.md"
+    - "**/*.pem"
+    - "**/.env*"
+    - "infra/production/**"
+
+  validation_commands:
+    - "npm run lint"
+    - "npm test"
+
+  codegraph:
+    max_files: 5000
+    blame_lookback_days: 365
+
+people:
+  - github: platform-maintainer
+    active: true
+    main_agent: codex
+
+    responsibilities:
+      domains:
+        - auth
+        - api
+      labels:
+        - area/auth
+        - area/backend
+      keywords:
+        - oauth
+        - login
+        - session
+        - api
+      paths:
+        - "src/auth/**"
+        - "src/api/**"
+
+    review:
+      can_review: true
+      high_risk_domains:
+        - auth
+        - permissions
+        - secrets
+      high_risk_paths:
+        - "src/auth/**"
+        - "infra/**"
+
+  - github: frontend-owner
+    active: true
+    main_agent: claude
+
+    responsibilities:
+      domains:
+        - frontend
+      labels:
+        - area/frontend
+      keywords:
+        - ui
+        - react
+        - accessibility
+      paths:
+        - "src/components/**"
+        - "src/pages/**"
+
+    review:
+      can_review: true
+      high_risk_domains:
+        - accessibility
+      high_risk_paths: []

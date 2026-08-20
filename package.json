@@ -1,0 +1,20 @@
+{
+  "name": "prarness-demo",
+  "version": "1.0.0",
+  "description": "A recipe-scaler mock repository for exercising PRarness.",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/server.mjs",
+    "lint": "npm run lint:app && npm run lint:pipeline",
+    "lint:app": "node --check src/components/recipe-scaler.mjs && node --check src/server.mjs && node --check public/app.mjs && node --check test/recipe-scaler.test.mjs && node --check test/server.test.mjs",
+    "lint:pipeline": "npm run lint --prefix .github/agent-pipeline",
+    "test": "npm run test:app && npm run test:pipeline",
+    "test:app": "node --test test/*.test.mjs",
+    "test:pipeline": "npm test --prefix .github/agent-pipeline"
+  }
+}

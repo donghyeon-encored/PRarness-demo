@@ -1,0 +1,158 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/agent-pipeline/plan.schema.json",
+  "title": "Diagnosis and implementation plan output",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "issue",
+    "iteration",
+    "phase",
+    "risk",
+    "problems",
+    "steps",
+    "validation_commands",
+    "changed_paths",
+    "units"
+  ],
+  "properties": {
+    "issue": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "iteration": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "phase": {
+      "type": "string",
+      "const": "plan"
+    },
+    "risk": {
+      "type": "string",
+      "enum": ["low", "high"]
+    },
+    "problems": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "problem",
+          "risk",
+          "status",
+          "evidence",
+          "owner",
+          "next_step"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^P-[0-9]{3,}$"
+          },
+          "problem": {
+            "type": "string",
+            "minLength": 1
+          },
+          "risk": {
+            "type": "string",
+            "enum": ["low", "high"]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "OPEN",
+              "PLANNED",
+              "IN_PROGRESS",
+              "FIXED",
+              "REVIEW_PENDING",
+              "HUMAN_REQUIRED",
+              "DONE"
+            ]
+          },
+          "evidence": {
+            "type": "string",
+            "minLength": 1
+          },
+          "owner": {
+            "type": ["string", "null"]
+          },
+          "next_step": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "steps": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "minItems": 1
+    },
+    "validation_commands": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "minItems": 1
+    },
+    "changed_paths": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
+    "units": {
+      "type": "array",
+      "description": "Populate with 2+ entries only when the whole plan is expected to exceed pipeline.change_scope.max_pr_changed_lines. Every problem id and every changed path must be claimed by exactly one unit; each unit becomes its own independently reviewable branch/PR under this Issue instead of one oversized PR. Leave empty when a single PR suffices.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "title", "problem_ids", "steps", "changed_paths"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^U[0-9]+$"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "problem_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^P-[0-9]{3,}$"
+            },
+            "minItems": 1,
+            "uniqueItems": true
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1
+          },
+          "changed_paths": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1,
+            "uniqueItems": true
+          }
+        }
+      }
+    }
+  }
+}
