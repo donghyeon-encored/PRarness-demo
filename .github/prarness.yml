@@ -1,0 +1,32 @@
+version: 1
+repository: donghyeon-encored/PRarness-demo
+
+runtime:
+  contract: 1
+
+dispatch:
+  mode: human_pr_mention
+  label: agent:run
+  auto_on_open_for_trusted: true
+
+publication:
+  mode: codex_cloud_direct
+  branch_prefix: agent/issue-
+
+ownership:
+  source: codeowners
+  fallback: donghyeon-encored
+
+validation:
+  commands:
+    - npm run lint
+    - npm test
+
+ci:
+  required: true
+  trigger: pull_request
+  workflow: prarness-ci.yml
+  app_slug: github-actions
+  required_checks:
+    - validation / PRarness validation
+  timeout_seconds: 900

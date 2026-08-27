@@ -1,9 +1,9 @@
 # PRarness Recipe Demo
 
 This is a standalone, dependency-free mock repository for exercising PRarness.
-It vendors a reviewed snapshot of the PRarness core under
-`.github/agent-pipeline` and pairs it with a small product that can receive a
-realistic issue and pull request.
+It uses a SHA-pinned central PRarness runtime through a thin repository adapter
+and pairs it with a small product that can receive a realistic issue and pull
+request.
 
 The mock product is a recipe scaler. It offers a small browser interface and a
 JSON endpoint that recalculates ingredient amounts when the serving count
@@ -53,28 +53,25 @@ src/components/recipe-scaler.mjs  recipe scaling domain logic
 src/server.mjs                  static server and JSON API
 test/                           product regression tests
 docs/demo-issue.md              ready-to-file exercise issue
-.github/agent-pipeline/         deterministic controller and schemas
-.github/workflows/              issue/review workflow
+.github/prarness.yml            repository-specific PRarness contract
+.github/workflows/              hostless Issue intake and secret-free CI
 ```
 
-The pipeline files are copied from the separate upstream PRarness repository;
-they are not maintained as product code in this demo. See
+The runtime is downloaded from the separate upstream PRarness repository and
+never committed into this demo. See
 [`docs/prarness-integration.md`](docs/prarness-integration.md) before updating
-the vendored snapshot.
+the pinned runtime SHA.
 
 ## Before enabling the agent workflow
 
-The committed workflow contains no secret values. A maintainer still needs to
-install the repository-scoped GitHub App and configure the repository secrets
-and variables referenced by the workflow. The placeholder GitHub logins in
-`.github/agent-pipeline/team.yaml` must also be replaced by real, assignable
-collaborators in a separately reviewed human change.
+Install the repository-scoped GitHub App and configure its App ID and private
+key only in this repository's Codex Cloud environment setup. Use the same
+pinned PRarness SHA for Cloud setup and maintenance. GitHub Actions itself
+receives no App private key or OpenAI API key.
 
 Never commit an App private key, API key, `.env` file, local `.npmrc`, or runner
-artifact. See [the publication checklist](docs/publication-checklist.md),
-[`.gitignore`](.gitignore), and
-[`docs/git-ground-rules.md`](docs/git-ground-rules.md) for the repository's
-publication and trust-boundary rules.
+artifact. See [`.gitignore`](.gitignore) and
+[`docs/prarness-integration.md`](docs/prarness-integration.md).
 
 ## License
 

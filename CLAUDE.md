@@ -1,8 +1,8 @@
-Before working, read:
+This repository contains the dependency-free PRarness recipe-scaler demo.
 
-- `.github/agent-pipeline/team.yaml`
-- `docs/git-ground-rules.md`
-
-Those files are the authoritative team and repository policies. Do not modify
-protected pipeline, workflow, ownership, or secret-related files unless the
-issue explicitly requests it and a human reviewer approves it.
+Use Node.js 20 or newer and run `npm run lint` plus `npm test` before
+publication. A PRarness-managed Issue task must run the installed
+`prarness-session prepare` command before editing and follow its pinned Cloud
+session contract. Never force-push, merge, self-approve, or expose configured
+credentials. Repository workflow and policy maintenance requires an explicit
+interactive user request.

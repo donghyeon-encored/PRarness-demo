@@ -1,0 +1,30 @@
+name: PRarness Issue intake
+
+on:
+  issues:
+    types: [opened, reopened, labeled]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: Existing source Issue number
+        required: true
+        type: number
+
+permissions: read-all
+
+concurrency:
+  group: prarness-intake-${{ github.event.issue.number || inputs.issue_number || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  intake:
+    if: github.event_name != 'issue_comment' || !github.event.issue.pull_request
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    uses: donghyeon-encored/PRarness/.github/workflows/reusable-intake.yml@3eee510a6110f30811217bf994277b6892202763
+    with:
+      runtime_ref: 3eee510a6110f30811217bf994277b6892202763

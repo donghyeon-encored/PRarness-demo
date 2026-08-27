@@ -1,44 +1,32 @@
 # PRarness integration
 
-This demo repository vendors the PRarness engine so it can run independently
-after being cloned. The upstream core and this demo are separate repositories:
-
-- Upstream core: `eastlighting1/prarness`
-- This repository: `eastlighting1/prarness-demo`
-- Initial snapshot date: 2026-08-20
-
-The bit-for-bit vendored engine boundary consists of:
+This demo uses the central PRarness runtime without vendoring it. The reviewed
+runtime revision is:
 
 ```text
-.github/agent-pipeline/pipeline.mjs
-.github/agent-pipeline/package.json
-.github/agent-pipeline/package-lock.json
-.github/agent-pipeline/prompts/**
-.github/agent-pipeline/schemas/**
-.github/agent-pipeline/test/**
-.github/workflows/issue-review.yml
-AGENTS.md
-CLAUDE.md
-docs/git-ground-rules.md
+donghyeon-encored/PRarness@3eee510a6110f30811217bf994277b6892202763
 ```
 
-`.github/agent-pipeline/team.yaml` is deliberately outside that synchronization
-boundary. It is repository-local ownership and risk configuration. The initial
-demo copy still contains upstream placeholder accounts; a human must replace
-them with real, assignable collaborators and verify the demo paths before the
-workflow is activated.
+The repository-specific adapter consists only of:
 
-Do not edit vendored engine files merely to customize the recipe example.
-Updating the engine requires a separately reviewed human change that:
+```text
+.github/prarness.yml
+.github/workflows/prarness-intake.yml
+.github/workflows/prarness-ci.yml
+AGENTS.md
+CLAUDE.md
+```
 
-1. identifies an exact upstream tag or commit;
-2. replaces the complete vendored engine boundary from that source;
-3. preserves and separately reviews the demo's `team.yaml` configuration;
-4. verifies that no demo-only change was mixed into the copied engine files;
-5. runs `npm run lint` and `npm test`; and
-6. records the upstream revision in this document.
+GitHub Actions creates the managed bootstrap branch and draft PR. A connected
+human then posts the PR's documented `@codex` command. Codex Cloud downloads
+the pinned runtime outside the checkout, verifies its checksums, and performs
+the bounded implementation and publication in one task. CI runs independently
+without repository secrets.
 
-The initial local source has not been committed yet, so it has no upstream Git
-revision to record. Replace the snapshot date above with an exact tag and full
-commit SHA after the core repository receives its initial human-authored
-commit.
+When updating PRarness, change both workflow refs and the Cloud environment's
+setup/maintenance `PRARNESS_BOOTSTRAP_REF` to the same reviewed 40-character
+commit SHA. Run `npm run lint` and `npm test`, validate the YAML files, and run
+the central `repository-check.mjs` compatibility check before publication.
+
+The target repository must never contain the GitHub App private key, App token,
+OpenAI API key, or a copied `.github/agent-pipeline/**` runtime.

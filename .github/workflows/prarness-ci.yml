@@ -1,0 +1,16 @@
+name: PRarness CI
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prarness-ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  validation:
+    uses: donghyeon-encored/PRarness/.github/workflows/reusable-validation.yml@3eee510a6110f30811217bf994277b6892202763
