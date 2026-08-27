@@ -26,7 +26,22 @@ export function parseAmount(value) {
     throw new RecipeValidationError("ingredient amount has an unsupported format");
   }
 
-  const amount = typeof value === "number" ? value : Number.parseFloat(text);
+  let amount;
+  if (typeof value === "number") {
+    amount = value;
+  } else if (isMixedFraction) {
+    const [wholeText, fractionText] = text.split(/\s+/);
+    const [numeratorText, denominatorText] = fractionText.split("/");
+    const denominator = Number(denominatorText);
+
+    if (denominator === 0) {
+      throw new RecipeValidationError("ingredient fraction denominator must be positive");
+    }
+
+    amount = Number(wholeText) + Number(numeratorText) / denominator;
+  } else {
+    amount = Number(text);
+  }
 
   if (!Number.isFinite(amount) || amount <= 0) {
     throw new RecipeValidationError("ingredient amount must be positive");
