@@ -24,6 +24,6 @@ jobs:
     permissions:
       contents: write
       issues: write
-    uses: donghyeon-encored/PRarness/.github/workflows/reusable-intake.yml@b01117a625cbe7fc668d67d481252c3b1f6d7920
+    uses: donghyeon-encored/PRarness/.github/workflows/reusable-intake.yml@5aaa756b6a3f457296c0a904dd38978f10f274ad
     with:
-      runtime_ref: b01117a625cbe7fc668d67d481252c3b1f6d7920
+      runtime_ref: 5aaa756b6a3f457296c0a904dd38978f10f274ad
