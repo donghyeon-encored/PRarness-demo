@@ -1,0 +1,10 @@
+{
+  "branch": "agent/issue-5-fix-mixed-fraction-ingredient-scaling",
+  "dispatch": "human_pr_mention",
+  "issue": 5,
+  "repository": "donghyeon-encored/PRarness-demo",
+  "request_id": "prarness-issue-5",
+  "runtime_ref": "a72e1d86cdfe0c146d6e5b885aee5ffb47a10d8a",
+  "source_sha": "c138a6cbd0aa67c085c88fe46ecf076082743d0f",
+  "version": 2
+}
