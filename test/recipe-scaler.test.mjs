@@ -51,6 +51,19 @@ test("combines repeated ingredients into a shopping list", () => {
   assert.equal(ingredients[0].amount, 1.5);
 });
 
+test("combines same-name ingredients regardless of unit", () => {
+  const ingredients = [
+    { name: "Flour", amount: 1, unit: "cups" },
+    { name: "Salt", amount: 0.5, unit: "tsp" },
+    { name: "flour", amount: 2, unit: "tbsp" },
+  ];
+
+  assert.deepEqual(createShoppingList(ingredients), [
+    { name: "Flour", amount: 3, unit: "cups" },
+    { name: "Salt", amount: 0.5, unit: "tsp" },
+  ]);
+});
+
 test("rejects invalid serving and ingredient values", () => {
   assert.throws(
     () => scaleRecipe({ baseServings: 0, targetServings: 4, ingredients: [] }),
