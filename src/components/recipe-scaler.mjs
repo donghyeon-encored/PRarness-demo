@@ -20,13 +20,24 @@ export function parseAmount(value) {
 
   const text = String(value).trim();
   const isDecimal = /^(?:\d+(?:\.\d*)?|\.\d+)$/.test(text);
-  const isMixedFraction = /^\d+\s+\d+\/\d+$/.test(text);
+  const mixedFraction = /^(\d+)\s+(\d+)\/(\d+)$/.exec(text);
 
-  if (typeof value === "string" && !isDecimal && !isMixedFraction) {
+  if (typeof value === "string" && !isDecimal && !mixedFraction) {
     throw new RecipeValidationError("ingredient amount has an unsupported format");
   }
 
-  const amount = typeof value === "number" ? value : Number.parseFloat(text);
+  let amount = typeof value === "number" ? value : Number.parseFloat(text);
+
+  if (mixedFraction) {
+    const [, wholeText, numeratorText, denominatorText] = mixedFraction;
+    const denominator = Number(denominatorText);
+
+    if (denominator === 0) {
+      throw new RecipeValidationError("ingredient amount fraction denominator must not be zero");
+    }
+
+    amount = Number(wholeText) + (Number(numeratorText) / denominator);
+  }
 
   if (!Number.isFinite(amount) || amount <= 0) {
     throw new RecipeValidationError("ingredient amount must be positive");
