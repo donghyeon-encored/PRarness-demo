@@ -14,8 +14,33 @@ publication:
   branch_prefix: agent/issue-
 
 ownership:
-  source: codeowners
+  source: config
   fallback: donghyeon-encored
+  max_issue_assignees: 1
+  max_pr_assignees: 3
+  people:
+    - github: donghyeon-encored
+      active: true
+      responsibilities:
+        domains:
+          - frontend
+          - recipe-scaling
+        labels:
+          - bug
+        keywords:
+          - recipe
+          - scale
+          - scaling
+          - ingredient
+          - fraction
+        paths:
+          - src/**
+          - public/**
+          - test/**
+      review:
+        can_review: true
+        high_risk_domains: []
+        high_risk_paths: []
 
 validation:
   commands:
