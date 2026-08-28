@@ -4,7 +4,7 @@ This demo uses the central PRarness runtime without vendoring it. The reviewed
 runtime revision is:
 
 ```text
-donghyeon-encored/PRarness@13e629235b6e12fd43a726dd64ff4cecf20f8955
+donghyeon-encored/PRarness@b01117a625cbe7fc668d67d481252c3b1f6d7920
 ```
 
 The repository-specific adapter consists only of:
@@ -33,10 +33,13 @@ receipt with `status=PUBLICATION_VERIFIED`, `complete=true`, and
 `verified=true` is accepted. A normal Codex Summary, local commit, or
 `make_pr` metadata is not publication evidence.
 
-When updating PRarness, change both workflow refs and the Cloud environment's
-setup/maintenance `PRARNESS_BOOTSTRAP_REF` to the same reviewed 40-character
-commit SHA. Run `npm run lint` and `npm test`, validate the YAML files, and
-run the central `repository-check.mjs` compatibility check before
+When updating PRarness, change both workflow refs to the same reviewed
+40-character commit SHA. Each canonical Issue/PR command self-installs that
+exact runtime without replacing the credential freshly minted by Cloud setup
+or maintenance, so routine runtime updates do not require a Cloud environment
+UI edit. Update the environment bootstrap only when a release explicitly drops
+compatibility with it. Run `npm run lint` and `npm test`, validate the YAML
+files, and run the central `repository-check.mjs` compatibility check before
 publication.
 
 The target repository must never contain the GitHub App private key, App token,
