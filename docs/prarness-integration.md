@@ -4,7 +4,7 @@ This demo uses the central PRarness runtime without vendoring it. The reviewed
 runtime revision is:
 
 ```text
-donghyeon-encored/PRarness@a72e1d86cdfe0c146d6e5b885aee5ffb47a10d8a
+donghyeon-encored/PRarness@ca501f41f594f7ac7a5f437650554a6c427c60ac
 ```
 
 The repository-specific adapter consists only of:
@@ -17,22 +17,29 @@ AGENTS.md
 CLAUDE.md
 ```
 
-GitHub Actions creates the managed bootstrap branch and draft PR. Its body
-contains an exact repository/Issue/PR-bound `@codex` command. A connected
-human posts that complete command without shortening it. Codex Cloud downloads
-the pinned runtime outside the checkout, verifies its checksums, runs R&R and
-CodeGraph preparation, implements and self-reviews the bounded change, assigns
-the reviewer, publishes managed review comments, and reconciles CI in one task.
+GitHub Actions creates only the managed bootstrap branch, labels, and canonical
+Issue comment. It does not request pull-request write permission. A connected
+human posts that comment's complete repository/Issue/branch-bound `@codex`
+command without shortening it. Codex Cloud downloads the pinned runtime outside
+the checkout, verifies its checksums, and uses the repository GitHub App to
+create or reuse the canonical draft PR during prepare. The same task checks out
+the managed branch, runs R&R and CodeGraph preparation, implements and
+self-reviews the bounded change, assigns the reviewer, publishes managed review
+comments, and reconciles CI. The PR body contains the exact PR-bound command
+for later continuations.
 
 Prepare and validation receipts are explicitly incomplete. Only a publish
 receipt with `status=PUBLICATION_VERIFIED`, `complete=true`, and
 `verified=true` is accepted. A normal Codex Summary, local commit, or
 `make_pr` metadata is not publication evidence.
 
-When updating PRarness, change both workflow refs and the Cloud environment's
-setup/maintenance `PRARNESS_BOOTSTRAP_REF` to the same reviewed 40-character
-commit SHA. Run `npm run lint` and `npm test`, validate the YAML files, and
-run the central `repository-check.mjs` compatibility check before
+When updating PRarness, change both workflow refs to the same reviewed
+40-character commit SHA. Each canonical Issue/PR command self-installs that
+exact runtime without replacing the credential freshly minted by Cloud setup
+or maintenance, so routine runtime updates do not require a Cloud environment
+UI edit. Update the environment bootstrap only when a release explicitly drops
+compatibility with it. Run `npm run lint` and `npm test`, validate the YAML
+files, and run the central `repository-check.mjs` compatibility check before
 publication.
 
 The target repository must never contain the GitHub App private key, App token,
