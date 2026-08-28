@@ -13,4 +13,4 @@ concurrency:
 
 jobs:
   validation:
-    uses: donghyeon-encored/PRarness/.github/workflows/reusable-validation.yml@5aaa756b6a3f457296c0a904dd38978f10f274ad
+    uses: donghyeon-encored/PRarness/.github/workflows/reusable-validation.yml@015f97ebd321ca5479d249449dec8d2e8866ec48
