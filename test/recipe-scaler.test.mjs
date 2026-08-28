@@ -62,4 +62,28 @@ test("rejects scaling results outside the supported numeric range", () => {
   );
 });
 
-test.todo("scales mixed-fraction amounts such as 1 1/2");
+test("scales mixed-fraction amounts such as 1 1/2", () => {
+  const result = scaleRecipe({
+    baseServings: 4,
+    targetServings: 8,
+    ingredients: [{ name: "Flour", amount: "1 1/2", unit: "cups" }],
+  });
+
+  assert.deepEqual(result.ingredients, [
+    { name: "Flour", amount: 3, unit: "cups" },
+  ]);
+});
+
+test("rejects malformed and zero-denominator mixed fractions", () => {
+  const invalidAmounts = [
+    "1 1 /2",
+    "1 1/ 2",
+    "1 1.5/2",
+    "1 1/2 cups",
+    "1 1/0",
+  ];
+
+  for (const amount of invalidAmounts) {
+    assert.throws(() => parseAmount(amount), RecipeValidationError);
+  }
+});
