@@ -4,7 +4,7 @@ This demo uses the central PRarness runtime without vendoring it. The reviewed
 runtime revision is:
 
 ```text
-donghyeon-encored/PRarness@015f97ebd321ca5479d249449dec8d2e8866ec48
+donghyeon-encored/PRarness@ca501f41f594f7ac7a5f437650554a6c427c60ac
 ```
 
 The repository-specific adapter consists only of:
