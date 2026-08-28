@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  createShoppingList,
   RecipeValidationError,
   parseAmount,
   scaleRecipe,
@@ -34,6 +35,20 @@ test("does not mutate the source ingredients", () => {
   });
 
   assert.deepEqual(ingredient, { name: "Eggs", amount: 2, unit: "" });
+});
+
+test("combines repeated ingredients into a shopping list", () => {
+  const ingredients = [
+    { name: "Flour", amount: 1.5, unit: "cups" },
+    { name: "flour", amount: 0.5, unit: "cups" },
+    { name: "Milk", amount: 1, unit: "cup" },
+  ];
+
+  assert.deepEqual(createShoppingList(ingredients), [
+    { name: "Flour", amount: 2, unit: "cups" },
+    { name: "Milk", amount: 1, unit: "cup" },
+  ]);
+  assert.equal(ingredients[0].amount, 1.5);
 });
 
 test("rejects invalid serving and ingredient values", () => {

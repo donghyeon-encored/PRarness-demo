@@ -59,6 +59,27 @@ function roundAmount(value, field) {
   return rounded;
 }
 
+export function createShoppingList(ingredients) {
+  const items = new Map();
+
+  for (const ingredient of ingredients) {
+    const key = ingredient.name.toLowerCase();
+    const existing = items.get(key);
+
+    if (existing) {
+      existing.amount = roundAmount(
+        existing.amount + ingredient.amount,
+        `${ingredient.name} shopping list amount`,
+      );
+      continue;
+    }
+
+    items.set(key, { ...ingredient });
+  }
+
+  return [...items.values()];
+}
+
 export function scaleRecipe(recipe) {
   if (!recipe || typeof recipe !== "object" || Array.isArray(recipe)) {
     throw new RecipeValidationError("recipe must be an object");
@@ -93,5 +114,6 @@ export function scaleRecipe(recipe) {
     targetServings: target,
     multiplier,
     ingredients: scaledIngredients,
+    shoppingList: createShoppingList(scaledIngredients),
   };
 }

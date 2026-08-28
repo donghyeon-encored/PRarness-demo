@@ -34,12 +34,19 @@ test("scales a recipe through the JSON API", async () => {
       body: JSON.stringify({
         baseServings: 2,
         targetServings: 6,
-        ingredients: [{ name: "Eggs", amount: 2, unit: "" }],
+        ingredients: [
+          { name: "Eggs", amount: 2, unit: "" },
+          { name: "Eggs", amount: 1, unit: "" },
+        ],
       }),
     });
 
     assert.equal(response.status, 200);
-    assert.equal((await response.json()).ingredients[0].amount, 6);
+    const result = await response.json();
+    assert.equal(result.ingredients[0].amount, 6);
+    assert.deepEqual(result.shoppingList, [
+      { name: "Eggs", amount: 9, unit: "" },
+    ]);
   });
 });
 
